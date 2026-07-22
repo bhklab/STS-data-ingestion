@@ -1,0 +1,15 @@
+[workspace]
+authors = ["mattbocc <matthew.boccalon@live.ca>", "MessereN <>"]
+channels = ["conda-forge"]
+name = "STS-data-ingestion"
+platforms = ["osx-arm64", "linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+python = ">=3.14.6,<3.15"
+sqlalchemy = ">=2.0.51,<3"
+pandas = ">=3.0.3,<4"
+python-dotenv = ">=1.2.2,<2"
+requests = ">=2.34.2,<3"
