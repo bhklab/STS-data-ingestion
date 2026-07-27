@@ -210,4 +210,8 @@ class PreClinicalCopyNumberVariation(Base):
 
     sample: Mapped["PreClinicalSample"] = relationship(back_populates="copy_number_variations")
 
-class 
+class PreClinicalGene(Base):
+    __tablename__ = "pre_clinical_gene"
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
