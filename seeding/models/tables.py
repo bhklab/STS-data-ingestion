@@ -75,12 +75,16 @@ class PreClinicalCellLine(Base):
         ),
     )
 
-    dataset: Mapped["PreClinicalDataset"] = relationship(back_populates="cell_lines")
+    dataset: Mapped["PreClinicalDataset"] = relationship(
+        back_populates="cell_lines",
+    )
+
     treatment_responses: Mapped[list["PreClinicalTreatmentResponse"]] = relationship(
         back_populates="cell_line",
         cascade="all, delete-orphan",
     )
-    samples: Mapped[list["Sample"]] = relationship(
+
+    samples: Mapped[list["PreClinicalSample"]] = relationship(
         back_populates="cell_line",
         cascade="all, delete-orphan",
     )
@@ -109,7 +113,9 @@ class PreClinicalTreatmentResponse(Base):
         ),
     )
 
-    cell_line: Mapped["PreClinicalCellLine"] = relationship(back_populates="treatment_responses")
+    cell_line: Mapped["PreClinicalCellLine"] = relationship(
+        back_populates="treatment_responses",
+    )
 
 
 class PreClinicalSample(Base):
@@ -139,7 +145,27 @@ class PreClinicalSample(Base):
     diseases: Mapped[str | None] = mapped_column(Text, nullable=True)
     disease_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
-    cell_line: Mapped["PreClinicalCellLine"] = relationship(back_populates="samples")
+    cell_line: Mapped["PreClinicalCellLine"] = relationship(
+        back_populates="samples",
+    )
+
+    rna_seq_data: Mapped[list["PreClinicalRnaSeq"]] = relationship(
+        back_populates="sample",
+        cascade="all, delete-orphan",
+    )
+
+    mutations: Mapped[list["PreClinicalMutation"]] = relationship(
+        back_populates="sample",
+        cascade="all, delete-orphan",
+    )
+
+    copy_number_variations: Mapped[
+        list["PreClinicalCopyNumberVariation"]
+    ] = relationship(
+        back_populates="sample",
+        cascade="all, delete-orphan",
+    )
+
 
 class PreClinicalRnaSeq(Base):
     __tablename__ = "pre_clinical_rna_seq"
@@ -162,7 +188,10 @@ class PreClinicalRnaSeq(Base):
         ),
     )
 
-    sample: Mapped["PreClinicalSample"] = relationship(back_populates="rna_seq_data")
+    sample: Mapped["PreClinicalSample"] = relationship(
+        back_populates="rna_seq_data",
+    )
+
 
 class PreClinicalMutation(Base):
     __tablename__ = "pre_clinical_mutation"
@@ -185,7 +214,10 @@ class PreClinicalMutation(Base):
         ),
     )
 
-    sample: Mapped["PreClinicalSample"] = relationship(back_populates="mutations")
+    sample: Mapped["PreClinicalSample"] = relationship(
+        back_populates="mutations",
+    )
+
 
 class PreClinicalCopyNumberVariation(Base):
     __tablename__ = "pre_clinical_copy_number_variation"
@@ -208,7 +240,10 @@ class PreClinicalCopyNumberVariation(Base):
         ),
     )
 
-    sample: Mapped["PreClinicalSample"] = relationship(back_populates="copy_number_variations")
+    sample: Mapped["PreClinicalSample"] = relationship(
+        back_populates="copy_number_variations",
+    )
+
 
 class PreClinicalGene(Base):
     __tablename__ = "pre_clinical_gene"

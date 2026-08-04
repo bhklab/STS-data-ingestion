@@ -1,12 +1,33 @@
-from datetime import datetime
-import pandas as pd
 from .seeding_coordinator_engine import alchemy_engine
 
 from ..models.tables import (
     Base,
     PreClinicalDataset,
+    PreClinicalCellLine,
+    PreClinicalTreatmentResponse,
+    PreClinicalSample,
+    PreClinicalRnaSeq,
+    PreClinicalMutation,
+    PreClinicalCopyNumberVariation,
+    PreClinicalGene,
 )
 
-Base.metadata.create_all(
-    bind=alchemy_engine(), tables=[PreClinicalDataset.__table__]
-)  # Defined table creation
+
+def main():
+    Base.metadata.create_all(
+        bind=alchemy_engine(),
+        tables=[
+            PreClinicalDataset.__table__,
+            PreClinicalCellLine.__table__,
+            PreClinicalTreatmentResponse.__table__,
+            PreClinicalSample.__table__,
+            PreClinicalRnaSeq.__table__,
+            PreClinicalMutation.__table__,
+            PreClinicalCopyNumberVariation.__table__,
+            PreClinicalGene.__table__,
+        ],
+    )
+
+
+if __name__ == "__main__":
+    main()
