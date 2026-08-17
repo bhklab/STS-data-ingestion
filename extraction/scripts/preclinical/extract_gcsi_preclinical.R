@@ -18,47 +18,53 @@ if (exists("mem.maxVSize", mode = "function")) {
 
 DATASET_ID <- 1
 
-CCLE_2019_RDS_PATH <- "extraction/data/raw/preclinical/CCLE_2019.rds"
-CCLE_2015_RDS_PATH <- "extraction/data/raw/preclinical/CCLE_2015.rds"
-
+GCSI_2019_RDS_PATH <- "extraction/data/raw/preclinical/GCSI_2019.rds"
 SHEET_CELL_LINE_QC_PATH <- "extraction/data/raw/preclinical/All_PSets_sarcoma_cell_line_QC.csv"
 
-OUT_DIR <- "extraction/data/proc/preclinical/CCLE"
-
-# Prefix used only for database/output sample IDs.
-# Raw CCLE sample IDs are preserved separately as source_sampleid for matching
-# CCLE_2019 sample IDs to CCLE_2015 microarray colData(rna)$CCLE.name.
-SAMPLE_ID_PREFIX <- "CCLE_"
+OUT_DIR <- "extraction/data/proc/preclinical/GCSI"
 
 dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
 
-# The new extraction set comes ONLY from the QC sheet where:
-#   mod_tissueid == "Soft Tissue"
-# and then matching sheet$cell_line against the CCLE_2019 sample slot
-# resolved cell-line-name column.
+# New extraction set:
+#   1. Read external QC sheet.
+#   2. Keep rows where mod_tissueid == "Soft Tissue".
+#   3. Match sheet$cell_line against ONE resolved GCSI sample-slot cell-line column.
 SHEET_TARGET_CELL_LINE_COL <- "cell_line"
 
-# Prefer an explicit cell_line_name column if it exists in CCLE_2019@sample.
-# Fall back to cellosaurus.cellLineName because the previous CCLE script used it.
-# Only ONE resolved column is used for the actual new extraction match.
-CCLE_2019_CELL_LINE_NAME_CANDIDATES <- c(
+# Prefer an explicit cell_line_name column if present. Fall back through known
+# GCSI/PharmacoSet sample-slot aliases. Only one resolved column is used for
+# the new extraction match.
+GCSI_CELL_LINE_NAME_CANDIDATES <- c(
   "cell_line_name",
-  "cellosaurus.cellLineName"
+  "Cell.line.primary.name",
+  "cellosaurus.cellLineName",
+  "sampleid",
+  "sample_id",
+  "cellLineName",
+  "cellline",
+  "cellid",
+  "id",
+  "Name",
+  "CCLE.name",
+  "sample_rowname"
 )
 
 # Original criteria are now audit-only.
-# They do NOT control the final extraction set anymore.
+# They DO NOT control the final extraction set anymore.
 TARGET_CELL_LINES_RAW <- paste0(
-  "A-204|D-247MG|NCI-H2373|NCI-H2596|RKN|S-117|SW684|VA-ES-BJ|",
-  "A-204|CAL-78|CS-1 [Human chondrosarcoma]|Hs 633.T|OUMS-27|Rh41|",
-  "S-117|SNU-1077|SYO-1|TE 125.T|VA-ES-BJ|CHSA0011|D-247MG|GI-1|",
-  "KYM-1|NCI-H2373|RS-5|Rh41|SK-LMS-1|TE 441.T|TE 617.T|",
-  "VA-ES-BJ|Aska-SS"
+  "105KC|SNU-1077|TE 159.T|Aska-SS|GI-1|MES-SA|NCI-H2373|",
+  "NCI-H2596|Rh30|SW982|CAL-78|JJ012|TE 125.T"
 )
 
 TARGET_CELL_LINES <- unique(trimws(
   unlist(strsplit(TARGET_CELL_LINES_RAW, "\\|"))
 ))
+
+SAMPLE_ID_PREFIX <- "gcsi_"
+
+RNA_PROFILE_NAME <- "Kallisto_0.46.1.rnaseq"
+CNV_PROFILE_NAME <- "cnv"
+MUTATION_PROFILE_NAME <- "mutation"
 
 # -------------------------------------------------------------------------
 # General helpers
@@ -82,21 +88,6 @@ clean_na <- function(x) {
   x <- as.character(x)
   x[x == "" | x == "NA" | x == "NS" | is.na(x)] <- NA_character_
   x
-}
-
-prefix_sample_id <- function(x, prefix = SAMPLE_ID_PREFIX) {
-  x <- clean_na(x)
-
-  out <- rep(NA_character_, length(x))
-  keep_idx <- !is.na(x)
-
-  out[keep_idx] <- ifelse(
-    startsWith(x[keep_idx], prefix),
-    x[keep_idx],
-    paste0(prefix, x[keep_idx])
-  )
-
-  out
 }
 
 parse_age_int <- function(x) {
@@ -133,14 +124,18 @@ normalize_category_value <- function(x) {
   x
 }
 
-normalize_array_id <- function(x) {
-  x <- as.character(x)
-  x <- trimws(x)
-  x <- basename(x)
-  x <- sub("\\.CEL(\\.GZ)?$", "", x, ignore.case = TRUE)
-  x <- toupper(x)
-  x[x == "" | x == "NA" | is.na(x)] <- NA_character_
-  x
+make_prefixed_sample_id <- function(cell_line_name) {
+  cell_line_name <- clean_na(cell_line_name)
+  out <- rep(NA_character_, length(cell_line_name))
+  keep_idx <- !is.na(cell_line_name)
+
+  out[keep_idx] <- ifelse(
+    startsWith(cell_line_name[keep_idx], SAMPLE_ID_PREFIX),
+    cell_line_name[keep_idx],
+    paste0(SAMPLE_ID_PREFIX, cell_line_name[keep_idx])
+  )
+
+  out
 }
 
 has_col <- function(dt, col) {
@@ -157,11 +152,11 @@ first_existing_col <- function(dt, candidates) {
   NA_character_
 }
 
-safe_col <- function(dt, candidates, default = NA_character_) {
+safe_col <- function(dt, candidates, n = nrow(dt), default = NA_character_) {
   col <- first_existing_col(dt, candidates)
 
   if (is.na(col)) {
-    return(rep(default, nrow(dt)))
+    return(rep(default, n))
   }
 
   dt[[col]]
@@ -202,6 +197,7 @@ make_gene_mapping <- function(se, ensembl_candidates, name_candidates) {
   gene_id <- strip_ensembl_version(gene_id)
   gene_name <- clean_na(gene_name)
 
+  # Fallback: if rownames are Ensembl IDs, use rownames as gene_id.
   feature_as_ensembl <- strip_ensembl_version(feature_id)
 
   use_feature_id <- (
@@ -218,17 +214,40 @@ make_gene_mapping <- function(se, ensembl_candidates, name_candidates) {
   )
 }
 
-resolve_ccle_2019_cell_line_col <- function(sample_dt) {
+get_assay_matrix <- function(se, assay_name = "exprs") {
+  if (!(assay_name %in% assayNames(se))) {
+    assay_name <- assayNames(se)[1]
+  }
+
+  assay(se, assay_name)
+}
+
+require_profile <- function(pset, profile_name) {
+  profile <- pset@molecularProfiles[[profile_name]]
+
+  if (is.null(profile)) {
+    stop(
+      "Could not find molecular profile named '",
+      profile_name,
+      "'. Available profiles are: ",
+      paste(names(pset@molecularProfiles), collapse = ", ")
+    )
+  }
+
+  profile
+}
+
+resolve_gcsi_cell_line_col <- function(sample_dt) {
   col <- first_existing_col(
     sample_dt,
-    CCLE_2019_CELL_LINE_NAME_CANDIDATES
+    GCSI_CELL_LINE_NAME_CANDIDATES
   )
 
   if (is.na(col)) {
     stop(
-      "Could not find a CCLE_2019 sample-slot cell-line-name column. ",
+      "Could not find a GCSI sample-slot cell-line-name column. ",
       "Expected one of: ",
-      paste(CCLE_2019_CELL_LINE_NAME_CANDIDATES, collapse = ", "),
+      paste(GCSI_CELL_LINE_NAME_CANDIDATES, collapse = ", "),
       ". Available columns are: ",
       paste(colnames(sample_dt), collapse = ", ")
     )
@@ -255,7 +274,7 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
 
   fwrite(
     data.table(column_name = colnames(sheet_dt)),
-    file.path(out_dir, "ccle_sheet_column_names.csv")
+    file.path(out_dir, "gcsi_sheet_column_names.csv")
   )
 
   required_cols <- c(
@@ -271,7 +290,7 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
       "QC sheet is missing required columns: ",
       paste(missing_required, collapse = ", "),
       ". See: ",
-      file.path(out_dir, "ccle_sheet_column_names.csv")
+      file.path(out_dir, "gcsi_sheet_column_names.csv")
     )
   }
 
@@ -308,15 +327,8 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
     )
   }
 
-  sheet_soft_tissue_dt[
-    ,
-    tissueid := clean_na(tissueid)
-  ]
-
-  sheet_soft_tissue_dt[
-    ,
-    mod_tissueid := clean_na(mod_tissueid)
-  ]
+  sheet_soft_tissue_dt[, tissueid := clean_na(tissueid)]
+  sheet_soft_tissue_dt[, mod_tissueid := clean_na(mod_tissueid)]
 
   sheet_soft_tissue_dt[
     ,
@@ -325,7 +337,9 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
       c(
         "Cellosaurus.Accession.id",
         "cellosaurus.cvcl_id",
-        "cellosaurus.cellosaurus.cvcl_id"
+        "cellosaurus.cellosaurus.cvcl_id",
+        "cellosaurus.accession",
+        "accession"
       )
     ))
   ]
@@ -337,7 +351,8 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
       c(
         "cellosaurus.category",
         "cellosaurus.cellosaurus.category",
-        "CellLine.Type"
+        "CellLine.Type",
+        "category"
       )
     ))
   ]
@@ -349,7 +364,10 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
       c(
         "cellosaurus.sex",
         "cellosaurus.cellosaurus.sex",
+        "cellosaurus.sexOfCell",
         "Gender",
+        "gender",
+        "Sex",
         "sex"
       )
     ))
@@ -362,6 +380,7 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
       c(
         "cellosaurus.age",
         "cellosaurus.cellosaurus.age",
+        "cellosaurus.ageAtSampling",
         "Age",
         "age"
       )
@@ -370,10 +389,25 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
 
   sheet_soft_tissue_dt[
     ,
+    sheet_dataset_value := clean_na(safe_col(.SD, c("dataset"), n = .N))
+  ]
+
+  sheet_soft_tissue_dt[
+    ,
+    sheet_object_type_value := clean_na(safe_col(.SD, c("object_type"), n = .N))
+  ]
+
+  sheet_soft_tissue_dt[
+    ,
+    sheet_sampleid_value := clean_na(safe_col(.SD, c("sampleid"), n = .N))
+  ]
+
+  sheet_soft_tissue_dt[
+    ,
     metadata_priority := fifelse(
-      dataset == "CCLE_2019",
+      grepl("GCSI", toupper(sheet_dataset_value)),
       1L,
-      fifelse(dataset == "CCLE_2015", 2L, 99L)
+      fifelse(grepl("GCSI", toupper(sheet_object_type_value)), 2L, 99L)
     )
   ]
 
@@ -404,12 +438,12 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
 
   fwrite(
     sheet_soft_tissue_dt,
-    file.path(out_dir, "ccle_sheet_soft_tissue_rows.csv")
+    file.path(out_dir, "gcsi_sheet_soft_tissue_rows.csv")
   )
 
   fwrite(
     sheet_soft_tissue_metadata_dt,
-    file.path(out_dir, "ccle_sheet_soft_tissue_cell_line_metadata.csv")
+    file.path(out_dir, "gcsi_sheet_soft_tissue_cell_line_metadata.csv")
   )
 
   fwrite(
@@ -419,9 +453,9 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
         .(
           sheet_cell_line_name,
           normalized_sheet_cell_line_name,
-          dataset,
-          object_type,
-          sampleid,
+          dataset = sheet_dataset_value,
+          object_type = sheet_object_type_value,
+          sampleid = sheet_sampleid_value,
           tissueid,
           mod_tissueid,
           accession,
@@ -431,7 +465,7 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
         )
       ]
     ),
-    file.path(out_dir, "ccle_sheet_soft_tissue_cell_line_targets.csv")
+    file.path(out_dir, "gcsi_sheet_soft_tissue_cell_line_targets.csv")
   )
 
   cat("QC-sheet soft tissue rows:", nrow(sheet_soft_tissue_dt), "\n")
@@ -444,50 +478,48 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
 }
 
 # -------------------------------------------------------------------------
-# CCLE 2019 selection and audit helpers
+# GCSI 2019 sample selection and original-criteria audit
 # -------------------------------------------------------------------------
 
-build_ccle_2019_selection <- function(
-  pset_2019,
+build_gcsi_selection <- function(
+  pset_gcsi,
   target_cell_lines,
   sheet_soft_tissue_metadata_dt,
   out_dir
 ) {
-  sample_dt <- as.data.table(
-    pset_2019@sample,
-    keep.rownames = "sample_rowname"
+  sample_dt <- as.data.table(pset_gcsi@sample, keep.rownames = "sample_rowname")
+
+  fwrite(
+    data.table(column_name = colnames(sample_dt)),
+    file.path(out_dir, "gcsi_sample_slot_columns.csv")
   )
 
-  ccle_cell_line_col <- resolve_ccle_2019_cell_line_col(sample_dt)
+  gcsi_cell_line_col <- resolve_gcsi_cell_line_col(sample_dt)
 
   fwrite(
     data.table(
-      ccle_2019_cell_line_name_column_used = ccle_cell_line_col
+      gcsi_cell_line_name_column_used = gcsi_cell_line_col
     ),
-    file.path(out_dir, "ccle_2019_cell_line_name_column_used.csv")
+    file.path(out_dir, "gcsi_cell_line_name_column_used.csv")
   )
 
   sample_dt[
     ,
-    ccle_2019_cell_line_name := clean_na(get(ccle_cell_line_col))
+    gcsi_cell_line_name := clean_na(get(gcsi_cell_line_col))
   ]
 
   sample_dt[
     ,
-    normalized_ccle_2019_cell_line_name :=
-      normalize_cell_line_name(ccle_2019_cell_line_name)
+    normalized_gcsi_cell_line_name := normalize_cell_line_name(gcsi_cell_line_name)
   ]
 
-  # -----------------------------------------------------------------------
-  # New extraction criterion:
-  # QC sheet mod_tissueid == "Soft Tissue" cell lines only.
-  # Match sheet$cell_line to ONE resolved CCLE_2019 sample-slot cell-line-name column.
-  # -----------------------------------------------------------------------
-
+  # New extraction criterion only:
+  # QC sheet mod_tissueid == "Soft Tissue", matched by sheet$cell_line to the
+  # one resolved GCSI sample-slot cell-line-name column.
   sample_dt[
     ,
     new_sheet_soft_tissue_match :=
-      normalized_ccle_2019_cell_line_name %in%
+      normalized_gcsi_cell_line_name %in%
         sheet_soft_tissue_metadata_dt$normalized_sheet_cell_line_name
   ]
 
@@ -497,9 +529,9 @@ build_ccle_2019_selection <- function(
 
   if (nrow(selected_sample_dt) == 0) {
     stop(
-      "No CCLE_2019 samples matched QC-sheet mod_tissueid == 'Soft Tissue' ",
-      "cell lines using CCLE_2019 sample-slot column: ",
-      ccle_cell_line_col
+      "No GCSI samples matched QC-sheet mod_tissueid == 'Soft Tissue' ",
+      "cell lines using GCSI sample-slot column: ",
+      gcsi_cell_line_col
     )
   }
 
@@ -510,9 +542,9 @@ build_ccle_2019_selection <- function(
       .(
         normalized_sheet_cell_line_name,
         sheet_cell_line_name,
-        sheet_dataset = dataset,
-        sheet_object_type = object_type,
-        sheet_sampleid = sampleid,
+        sheet_dataset = sheet_dataset_value,
+        sheet_object_type = sheet_object_type_value,
+        sheet_sampleid = sheet_sampleid_value,
         sheet_tissueid = tissueid,
         sheet_mod_tissueid = mod_tissueid,
         sheet_accession = accession,
@@ -521,51 +553,56 @@ build_ccle_2019_selection <- function(
         sheet_age = age_raw
       )
     ],
-    by.x = "normalized_ccle_2019_cell_line_name",
+    by.x = "normalized_gcsi_cell_line_name",
     by.y = "normalized_sheet_cell_line_name",
     all.x = TRUE
   )
 
   selected_sample_dt[
     ,
-    final_cell_line_name := clean_na(sheet_cell_line_name)
+    canonical_cell_line_name := clean_na(sheet_cell_line_name)
   ]
 
   selected_sample_dt[
-    is.na(final_cell_line_name),
-    final_cell_line_name := ccle_2019_cell_line_name
-  ]
-
-  if (!has_col(selected_sample_dt, "sampleid")) {
-    stop(
-      "CCLE_2019 sample slot must contain sampleid because this is the ",
-      "final pre_clinical_sample.id and the bridge to CCLE_2015 microarray colData$CCLE.name."
-    )
-  }
-
-  selected_sample_dt[
-    ,
-    source_sampleid := clean_na(sampleid)
+    is.na(canonical_cell_line_name),
+    canonical_cell_line_name := gcsi_cell_line_name
   ]
 
   selected_sample_dt[
     ,
-    prefixed_sampleid := prefix_sample_id(source_sampleid)
+    final_cell_line_name := canonical_cell_line_name
+  ]
+
+  selected_sample_dt[
+    ,
+    source_sampleid := canonical_cell_line_name
+  ]
+
+  selected_sample_dt[
+    ,
+    canonical_sample_id := make_prefixed_sample_id(source_sampleid)
   ]
 
   # -----------------------------------------------------------------------
-  # Original criteria are audit-only now.
-  # They do not affect selected_sample_dt.
+  # Original criteria audit only.
+  # These rows do not change selected_sample_dt.
   # -----------------------------------------------------------------------
 
   original_target_norm <- normalize_cell_line_name(target_cell_lines)
 
   original_candidate_cols <- c(
     "cellosaurus.cellLineName",
-    "CCLE.name",
-    "CCLE.sampleid",
+    "Cell.line.primary.name",
+    "cell_line_name",
+    "cellLineName",
+    "cellline",
+    "cellid",
     "sampleid",
-    "unique.sampleid",
+    "sample_id",
+    "id",
+    "Name",
+    "CCLE.name",
+    "rownames",
     "sample_rowname"
   )
 
@@ -582,16 +619,9 @@ build_ccle_2019_selection <- function(
 
   sample_dt[, original_soft_tissue_match := FALSE]
 
-  if (has_col(sample_dt, "CCLE.site_Primary")) {
+  if (has_col(sample_dt, "tissueid")) {
     sample_dt[
-      normalize_category_value(`CCLE.site_Primary`) == "soft_tissue",
-      original_soft_tissue_match := TRUE
-    ]
-  }
-
-  if (has_col(sample_dt, "CCLE.type")) {
-    sample_dt[
-      normalize_category_value(`CCLE.type`) == "soft_tissue",
+      normalize_category_value(tissueid) == "soft_tissue",
       original_soft_tissue_match := TRUE
     ]
   }
@@ -603,13 +633,12 @@ build_ccle_2019_selection <- function(
 
   original_criteria_dt[
     ,
-    original_cell_line_name := ccle_2019_cell_line_name
+    original_cell_line_name := gcsi_cell_line_name
   ]
 
   original_criteria_dt[
     ,
-    normalized_original_cell_line_name :=
-      normalize_cell_line_name(original_cell_line_name)
+    normalized_original_cell_line_name := normalize_cell_line_name(original_cell_line_name)
   ]
 
   final_norm <- unique(
@@ -620,53 +649,51 @@ build_ccle_2019_selection <- function(
     !(normalized_original_cell_line_name %in% final_norm)
   ]
 
-  fwrite(
-    original_criteria_dt[
-      ,
-      .(
-        sampleid = prefix_sample_id(sampleid),
-        source_sampleid = clean_na(sampleid),
-        cell_line_name = original_cell_line_name,
-        ccle_2019_cell_line_name_column_used = ccle_cell_line_col,
-        CCLE.name = if (has_col(.SD, "CCLE.name")) clean_na(`CCLE.name`) else NA_character_,
-        CCLE.sampleid = if (has_col(.SD, "CCLE.sampleid")) clean_na(`CCLE.sampleid`) else NA_character_,
-        CCLE.site_Primary = if (has_col(.SD, "CCLE.site_Primary")) clean_na(`CCLE.site_Primary`) else NA_character_,
-        CCLE.type = if (has_col(.SD, "CCLE.type")) clean_na(`CCLE.type`) else NA_character_,
-        original_target_match,
-        original_soft_tissue_match
-      )
-    ],
-    file.path(out_dir, "ccle_original_criteria_cell_line_list_audit_only.csv")
+  original_audit_dt <- data.table(
+    source_sampleid = clean_na(coalesce_dt_cols(
+      original_criteria_dt,
+      c("sampleid", "sample_id", "cellid", "id", "sample_rowname")
+    )),
+    sample_id = make_prefixed_sample_id(clean_na(original_criteria_dt$original_cell_line_name)),
+    cell_line_name = clean_na(original_criteria_dt$original_cell_line_name),
+    gcsi_cell_line_name_column_used = gcsi_cell_line_col,
+    tissueid = clean_na(safe_col(original_criteria_dt, c("tissueid"))),
+    original_target_match = original_criteria_dt$original_target_match,
+    original_soft_tissue_match = original_criteria_dt$original_soft_tissue_match
+  )
+
+  original_not_in_final_audit_dt <- data.table(
+    source_sampleid = clean_na(coalesce_dt_cols(
+      original_not_in_final_dt,
+      c("sampleid", "sample_id", "cellid", "id", "sample_rowname")
+    )),
+    sample_id = make_prefixed_sample_id(clean_na(original_not_in_final_dt$original_cell_line_name)),
+    cell_line_name = clean_na(original_not_in_final_dt$original_cell_line_name),
+    gcsi_cell_line_name_column_used = gcsi_cell_line_col,
+    tissueid = clean_na(safe_col(original_not_in_final_dt, c("tissueid"))),
+    original_target_match = original_not_in_final_dt$original_target_match,
+    original_soft_tissue_match = original_not_in_final_dt$original_soft_tissue_match
   )
 
   fwrite(
-    original_not_in_final_dt[
-      ,
-      .(
-        sampleid = prefix_sample_id(sampleid),
-        source_sampleid = clean_na(sampleid),
-        cell_line_name = original_cell_line_name,
-        ccle_2019_cell_line_name_column_used = ccle_cell_line_col,
-        CCLE.name = if (has_col(.SD, "CCLE.name")) clean_na(`CCLE.name`) else NA_character_,
-        CCLE.sampleid = if (has_col(.SD, "CCLE.sampleid")) clean_na(`CCLE.sampleid`) else NA_character_,
-        CCLE.site_Primary = if (has_col(.SD, "CCLE.site_Primary")) clean_na(`CCLE.site_Primary`) else NA_character_,
-        CCLE.type = if (has_col(.SD, "CCLE.type")) clean_na(`CCLE.type`) else NA_character_,
-        original_target_match,
-        original_soft_tissue_match
-      )
-    ],
-    file.path(out_dir, "ccle_original_criteria_not_in_final_new_criteria.csv")
+    original_audit_dt,
+    file.path(out_dir, "gcsi_original_criteria_cell_line_list_audit_only.csv")
+  )
+
+  fwrite(
+    original_not_in_final_audit_dt,
+    file.path(out_dir, "gcsi_original_criteria_not_in_final_new_criteria.csv")
   )
 
   fwrite(
     selected_sample_dt[
       ,
       .(
-        sampleid = prefix_sample_id(source_sampleid),
-        source_sampleid = clean_na(source_sampleid),
+        sample_id = canonical_sample_id,
+        source_sampleid,
         cell_line_name = final_cell_line_name,
-        ccle_2019_cell_line_name = ccle_2019_cell_line_name,
-        ccle_2019_cell_line_name_column_used = ccle_cell_line_col,
+        gcsi_cell_line_name,
+        gcsi_cell_line_name_column_used = gcsi_cell_line_col,
         sheet_cell_line_name,
         sheet_dataset,
         sheet_object_type,
@@ -679,11 +706,16 @@ build_ccle_2019_selection <- function(
         sheet_age
       )
     ],
-    file.path(out_dir, "ccle_final_extracted_cell_line_list_new_criteria.csv")
+    file.path(out_dir, "gcsi_final_extracted_cell_line_list_new_criteria.csv")
   )
 
-  cat("CCLE_2019 cell-line-name column used:", ccle_cell_line_col, "\n")
-  cat("Final new-criteria selected CCLE_2019 sample rows:", nrow(selected_sample_dt), "\n")
+  fwrite(
+    selected_sample_dt,
+    file.path(out_dir, "gcsi_2019_selected_sample_slot_rows.csv")
+  )
+
+  cat("GCSI cell-line-name column used:", gcsi_cell_line_col, "\n")
+  cat("Final new-criteria selected GCSI sample rows:", nrow(selected_sample_dt), "\n")
   cat("Original-criteria audit rows:", nrow(original_criteria_dt), "\n")
   cat("Original-criteria rows not in final new criteria:", nrow(original_not_in_final_dt), "\n")
 
@@ -691,28 +723,29 @@ build_ccle_2019_selection <- function(
     selected_sample_dt = selected_sample_dt,
     original_criteria_dt = original_criteria_dt,
     original_not_in_final_dt = original_not_in_final_dt,
-    ccle_cell_line_col = ccle_cell_line_col
+    gcsi_cell_line_col = gcsi_cell_line_col
   )
 }
 
-build_canonical_lookup <- function(selected_sample_dt) {
-  canonical_source_sample_id <- clean_na(selected_sample_dt[["source_sampleid"]])
-
-  if (all(is.na(canonical_source_sample_id))) {
-    canonical_source_sample_id <- clean_na(selected_sample_dt[["sampleid"]])
-  }
-
-  canonical_sample_id <- prefix_sample_id(canonical_source_sample_id)
-  canonical_cell_line <- clean_na(selected_sample_dt[["final_cell_line_name"]])
-
+build_canonical_lookup_gcsi <- function(selected_sample_dt) {
   alt_cols <- c(
-    "ccle_2019_cell_line_name",
+    "canonical_cell_line_name",
     "final_cell_line_name",
-    "CCLE.name",
-    "CCLE.sampleid",
+    "canonical_sample_id",
     "source_sampleid",
+    "gcsi_cell_line_name",
+    "cellosaurus.cellLineName",
+    "Cell.line.primary.name",
+    "cell_line_name",
+    "cellLineName",
+    "cellline",
+    "cellid",
     "sampleid",
-    "unique.sampleid",
+    "sample_id",
+    "id",
+    "Name",
+    "CCLE.name",
+    "rownames",
     "sample_rowname"
   )
 
@@ -723,9 +756,9 @@ build_canonical_lookup <- function(selected_sample_dt) {
       pieces[[col]] <- data.table(
         lookup_name = clean_na(selected_sample_dt[[col]]),
         normalized_lookup_name = normalize_cell_line_name(selected_sample_dt[[col]]),
-        sample_id = canonical_sample_id,
-        source_sampleid = canonical_source_sample_id,
-        cell_line_name = canonical_cell_line,
+        sample_id = selected_sample_dt$canonical_sample_id,
+        source_sampleid = selected_sample_dt$source_sampleid,
+        cell_line_name = selected_sample_dt$canonical_cell_line_name,
         source_column = col
       )
     }
@@ -747,10 +780,10 @@ build_canonical_lookup <- function(selected_sample_dt) {
 }
 
 # -------------------------------------------------------------------------
-# Generic molecular profile column mapping
+# Molecular profile column mapping
 # -------------------------------------------------------------------------
 
-build_profile_column_map <- function(se, canonical_lookup) {
+build_profile_column_map <- function(se, canonical_lookup, profile_label) {
   cd <- as.data.table(
     as.data.frame(colData(se)),
     keep.rownames = "coldata_rownames"
@@ -758,21 +791,27 @@ build_profile_column_map <- function(se, canonical_lookup) {
 
   cd[, colname := colnames(se)]
 
+  fwrite(
+    data.table(column_name = colnames(cd)),
+    file.path(OUT_DIR, paste0("gcsi_", profile_label, "_coldata_columns.csv"))
+  )
+
   candidate_cols <- c(
     "cellosaurus.cellLineName",
-    "CCLE.name",
-    "CCLE.sampleid",
-    "sampleid",
-    "unique.sampleid",
-    "dataset_sample_id",
-    "ccle_sample_id",
     "Cell.line.primary.name",
+    "cell_line_name",
+    "cellLineName",
+    "cellline",
     "Cell_Line",
+    "sampleid",
+    "sample_id",
+    "ccle_sample_id",
+    "dataset_sample_id",
+    "cellid",
+    "id",
     "Name",
+    "CCLE.name",
     "samplename",
-    "filename",
-    "Expression.arrays",
-    "SNP.arrays",
     "rownames",
     "coldata_rownames",
     "colname"
@@ -791,9 +830,18 @@ build_profile_column_map <- function(se, canonical_lookup) {
   }
 
   if (length(pieces) == 0) {
+    warning(
+      "No candidate mapping columns found in colData for profile ",
+      profile_label,
+      ". See gcsi_",
+      profile_label,
+      "_coldata_columns.csv."
+    )
+
     return(data.table(
       colname = character(),
       sample_id = character(),
+      source_sampleid = character(),
       cell_line_name = character(),
       matched_column = character()
     ))
@@ -803,7 +851,7 @@ build_profile_column_map <- function(se, canonical_lookup) {
   candidate_map <- candidate_map[!is.na(normalized_lookup_name)]
 
   canonical_lookup_unique <- unique(
-    canonical_lookup[, .(normalized_lookup_name, sample_id, cell_line_name)],
+    canonical_lookup[, .(normalized_lookup_name, sample_id, source_sampleid, cell_line_name)],
     by = "normalized_lookup_name"
   )
 
@@ -818,122 +866,7 @@ build_profile_column_map <- function(se, canonical_lookup) {
 
   mapped <- unique(mapped, by = "colname")
 
-  mapped[, .(colname, sample_id, cell_line_name, matched_column)]
-}
-
-# -------------------------------------------------------------------------
-# CCLE 2015 RNA/microarray-specific column mapping
-# -------------------------------------------------------------------------
-
-build_2015_rna_column_map <- function(rna_se, pset_2015, canonical_lookup) {
-  rna_cd <- as.data.table(
-    as.data.frame(colData(rna_se)),
-    keep.rownames = "coldata_rownames"
-  )
-
-  rna_cd[, colname := colnames(rna_se)]
-
-  fwrite(
-    rna_cd,
-    file.path(OUT_DIR, "ccle_2015_microarray_coldata.csv")
-  )
-
-  fwrite(
-    data.table(column_name = colnames(rna_cd)),
-    file.path(OUT_DIR, "ccle_2015_microarray_coldata_columns.csv")
-  )
-
-  if (!has_col(rna_cd, "CCLE.name")) {
-    stop(
-      "CCLE_2015 RNA colData must contain 'CCLE.name'. ",
-      "The requested mapping is CCLE_2019@sample$sampleid -> colData(rna)$CCLE.name. ",
-      "See: ",
-      file.path(OUT_DIR, "ccle_2015_microarray_coldata_columns.csv")
-    )
-  }
-
-  canonical_sample_lookup <- unique(
-    canonical_lookup[
-      source_column %in% c("source_sampleid", "sampleid"),
-      .(
-        sample_id,
-        source_sampleid,
-        normalized_source_sampleid = normalize_cell_line_name(source_sampleid),
-        cell_line_name
-      )
-    ],
-    by = "source_sampleid"
-  )
-
-  canonical_sample_lookup <- canonical_sample_lookup[
-    !is.na(sample_id) &
-      !is.na(source_sampleid) &
-      !is.na(normalized_source_sampleid) &
-      !is.na(cell_line_name)
-  ]
-
-  rna_candidates <- data.table(
-    colname = rna_cd$colname,
-    coldata_rownames = rna_cd$coldata_rownames,
-    rna_coldata_ccle_name = clean_na(rna_cd[["CCLE.name"]]),
-    normalized_source_sampleid = normalize_cell_line_name(rna_cd[["CCLE.name"]])
-  )
-
-  direct_mapped <- merge(
-    rna_candidates,
-    canonical_sample_lookup,
-    by = "normalized_source_sampleid",
-    all = FALSE
-  )
-
-  if (nrow(direct_mapped) == 0) {
-    stop(
-      "No CCLE 2015 RNA microarray columns matched using raw ",
-      "CCLE_2019@sample$sampleid -> colData(rna)$CCLE.name. ",
-      "The database sample_id is prefixed, but matching still uses source_sampleid. ",
-      "Check ccle_2015_microarray_coldata.csv and ccle_2019_canonical_lookup.csv."
-    )
-  }
-
-  direct_mapped[
-    ,
-    matched_column := "raw CCLE_2019@sample$sampleid -> colData(rna)$CCLE.name; output sample_id is prefixed"
-  ]
-
-  duplicate_sample_map <- direct_mapped[, .N, by = sample_id][N > 1]
-
-  fwrite(
-    duplicate_sample_map,
-    file.path(OUT_DIR, "ccle_2015_microarray_duplicate_sample_columns.csv")
-  )
-
-  if (nrow(duplicate_sample_map) > 0) {
-    warning(
-      "CCLE 2015 RNA column map has duplicate source columns for ",
-      nrow(duplicate_sample_map),
-      " canonical sample_id values. Keeping first per sample_id. See: ",
-      file.path(OUT_DIR, "ccle_2015_microarray_duplicate_sample_columns.csv")
-    )
-  }
-
-  direct_mapped <- direct_mapped[
-    colname %in% colnames(rna_se)
-  ]
-
-  direct_mapped <- unique(direct_mapped, by = "sample_id")
-
-  direct_mapped[
-    ,
-    .(
-      colname,
-      sample_id,
-      source_sampleid,
-      cell_line_name,
-      matched_column,
-      rna_coldata_ccle_name,
-      coldata_rownames
-    )
-  ]
+  mapped[, .(colname, sample_id, source_sampleid, cell_line_name, matched_column)]
 }
 
 # -------------------------------------------------------------------------
@@ -1232,12 +1165,12 @@ finalize_gene_table <- function(gene_part_paths, out_dir) {
 }
 
 # -------------------------------------------------------------------------
-# CCLE 2015 treatment response using summarizeSensitivityProfiles
+# GCSI treatment response using summarizeSensitivityProfiles
 # -------------------------------------------------------------------------
 
-get_available_cell_lines_for_sensitivity <- function(pset_2015) {
+get_available_cell_lines_for_sensitivity <- function(pset_gcsi) {
   out <- tryCatch(
-    cellNames(pset_2015),
+    cellNames(pset_gcsi),
     error = function(e) {
       character()
     }
@@ -1251,25 +1184,19 @@ get_available_cell_lines_for_sensitivity <- function(pset_2015) {
   }
 
   sample_dt <- as.data.table(
-    pset_2015@sample,
+    pset_gcsi@sample,
     keep.rownames = "sample_rowname"
   )
 
   candidate_col <- first_existing_col(
     sample_dt,
-    c(
-      "Cell.line.primary.name",
-      "cellosaurus.cellLineName",
-      "CCLE.name",
-      "sampleid",
-      "sample_rowname"
-    )
+    GCSI_CELL_LINE_NAME_CANDIDATES
   )
 
   if (is.na(candidate_col)) {
     stop(
-      "Could not determine available CCLE 2015 cell lines. ",
-      "cellNames(pset_2015) failed and no usable sample column was found."
+      "Could not determine available GCSI cell lines. ",
+      "cellNames(pset_gcsi) failed and no usable sample column was found."
     )
   }
 
@@ -1300,13 +1227,23 @@ summarized_sensitivity_to_long <- function(
 
   mat <- as.matrix(mat)
 
+  # Expected PharmacoGx shape is treatment/drug IDs as rows and cell lines as
+  # columns. If an object returns the reverse orientation, transpose it.
+  input_norm <- normalize_cell_line_name(cell_lines)
+  row_cell_count <- sum(normalize_cell_line_name(rownames(mat)) %in% input_norm, na.rm = TRUE)
+  col_cell_count <- sum(normalize_cell_line_name(colnames(mat)) %in% input_norm, na.rm = TRUE)
+
+  if (row_cell_count > col_cell_count) {
+    mat <- t(mat)
+  }
+
   fwrite(
     data.table(
       treatment_id = rownames(mat)
     ),
     file.path(
       out_dir,
-      paste0("ccle_2015_treatment_ids_from_", sensitivity_measure, ".csv")
+      paste0("gcsi_treatment_ids_from_", sensitivity_measure, ".csv")
     )
   )
 
@@ -1316,7 +1253,7 @@ summarized_sensitivity_to_long <- function(
     ),
     file.path(
       out_dir,
-      paste0("ccle_2015_cell_lines_from_", sensitivity_measure, ".csv")
+      paste0("gcsi_cell_lines_from_", sensitivity_measure, ".csv")
     )
   )
 
@@ -1337,24 +1274,22 @@ summarized_sensitivity_to_long <- function(
   ]
 }
 
-extract_treatment_response_2015 <- function(pset_2015, canonical_lookup, out_path) {
-  # Important:
-  # Treatment response uses selected CCLE_2019 final cell_line_name values,
-  # not CCLE_2019 sampleid values.
+extract_treatment_response_gcsi <- function(pset_gcsi, canonical_lookup, out_path) {
   selected_cell_line_lookup <- unique(
     canonical_lookup[
-      source_column == "final_cell_line_name",
+      source_column %in% c("canonical_cell_line_name", "final_cell_line_name"),
       .(
-        canonical_sample_id = sample_id,
+        sample_id,
+        source_sampleid,
         cell_line_name,
         normalized_cell_line_name = normalize_cell_line_name(cell_line_name)
       )
     ],
-    by = c("canonical_sample_id", "cell_line_name")
+    by = c("sample_id", "cell_line_name")
   )
 
   selected_cell_line_lookup <- selected_cell_line_lookup[
-    !is.na(canonical_sample_id) &
+    !is.na(sample_id) &
       !is.na(cell_line_name) &
       !is.na(normalized_cell_line_name)
   ]
@@ -1362,20 +1297,20 @@ extract_treatment_response_2015 <- function(pset_2015, canonical_lookup, out_pat
   if (nrow(selected_cell_line_lookup) == 0) {
     stop(
       "No selected cell_line_name values found in canonical lookup. ",
-      "Treatment response requires selected CCLE_2019 final_cell_line_name values."
+      "Treatment response requires selected final/canonical cell-line names."
     )
   }
 
-  available_cell_lines <- get_available_cell_lines_for_sensitivity(pset_2015)
+  available_cell_lines <- get_available_cell_lines_for_sensitivity(pset_gcsi)
 
   available_lookup <- data.table(
-    ccle_2015_cell_line_name = available_cell_lines,
+    gcsi_cell_line_name_for_summary = available_cell_lines,
     normalized_cell_line_name = normalize_cell_line_name(available_cell_lines)
   )
 
   available_lookup <- unique(
     available_lookup[
-      !is.na(ccle_2015_cell_line_name) &
+      !is.na(gcsi_cell_line_name_for_summary) &
         !is.na(normalized_cell_line_name)
     ],
     by = "normalized_cell_line_name"
@@ -1390,36 +1325,36 @@ extract_treatment_response_2015 <- function(pset_2015, canonical_lookup, out_pat
 
   fwrite(
     cell_line_match,
-    sub("\\.csv$", "_selected_cell_lines_available_in_ccle_2015.csv", out_path)
+    sub("\\.csv$", "_selected_cell_lines_available_in_gcsi.csv", out_path)
   )
 
-  missing_cell_lines <- cell_line_match[is.na(ccle_2015_cell_line_name)]
+  missing_cell_lines <- cell_line_match[is.na(gcsi_cell_line_name_for_summary)]
 
   fwrite(
     missing_cell_lines,
-    sub("\\.csv$", "_selected_cell_lines_missing_from_ccle_2015.csv", out_path)
+    sub("\\.csv$", "_selected_cell_lines_missing_from_gcsi.csv", out_path)
   )
 
-  cell_lines_to_use <- unique(clean_na(cell_line_match$ccle_2015_cell_line_name))
+  cell_lines_to_use <- unique(clean_na(cell_line_match$gcsi_cell_line_name_for_summary))
   cell_lines_to_use <- cell_lines_to_use[!is.na(cell_lines_to_use)]
 
   if (length(cell_lines_to_use) == 0) {
     stop(
-      "None of the selected CCLE_2019 cell_line_name values matched CCLE_2015 sensitivity cell lines. ",
+      "None of the selected GCSI cell_line_name values matched sensitivity cell lines. ",
       "See: ",
-      sub("\\.csv$", "_selected_cell_lines_missing_from_ccle_2015.csv", out_path)
+      sub("\\.csv$", "_selected_cell_lines_missing_from_gcsi.csv", out_path)
     )
   }
 
   aac_long <- summarized_sensitivity_to_long(
-    pset = pset_2015,
+    pset = pset_gcsi,
     sensitivity_measure = "aac_recomputed",
     cell_lines = cell_lines_to_use,
     out_dir = OUT_DIR
   )
 
   ic50_long <- summarized_sensitivity_to_long(
-    pset = pset_2015,
+    pset = pset_gcsi,
     sensitivity_measure = "ic50_recomputed",
     cell_lines = cell_lines_to_use,
     out_dir = OUT_DIR
@@ -1439,11 +1374,12 @@ extract_treatment_response_2015 <- function(pset_2015, canonical_lookup, out_pat
 
   response_cell_line_lookup <- unique(
     cell_line_match[
-      !is.na(ccle_2015_cell_line_name),
+      !is.na(gcsi_cell_line_name_for_summary),
       .(
         normalized_cell_line_name,
-        ccle_2015_cell_line_name,
-        canonical_sample_id,
+        gcsi_cell_line_name_for_summary,
+        sample_id,
+        source_sampleid,
         cell_line_name
       )
     ],
@@ -1475,7 +1411,7 @@ extract_treatment_response_2015 <- function(pset_2015, canonical_lookup, out_pat
       as.numeric(treatment_response_mapped[["ic50_recomputed"]])
     ),
 
-    # Keeping the existing DB/schema field name.
+    # Keeping the shared DB/schema field name.
     # This value comes from summarizeSensitivityProfiles(..., "aac_recomputed").
     acc_recomputed = suppressWarnings(
       as.numeric(treatment_response_mapped[["aac_recomputed"]])
@@ -1490,8 +1426,8 @@ extract_treatment_response_2015 <- function(pset_2015, canonical_lookup, out_pat
   ]
 
   # summarizeSensitivityProfiles(summary.stat = "mean") should already collapse
-  # replicate/raw experiment duplicates. This check only catches accidental
-  # duplicate mappings caused by duplicated selected cell-line names.
+  # raw replicate experiments. This check only catches accidental duplicate
+  # mappings caused by duplicated selected cell-line names.
   duplicate_after_summary <- treatment_response_dt[
     ,
     .N,
@@ -1529,26 +1465,30 @@ extract_treatment_response_2015 <- function(pset_2015, canonical_lookup, out_pat
 
   fwrite(treatment_response_dt, out_path)
 
-  cat("Wrote CCLE 2015 summarized treatment response rows:", nrow(treatment_response_dt), "\n")
+  cat("Wrote GCSI summarized treatment response rows:", nrow(treatment_response_dt), "\n")
 }
 
 # -------------------------------------------------------------------------
-# Phase 1: Load CCLE 2019 only
+# Load GCSI 2019
 # -------------------------------------------------------------------------
 
 cat("\n==============================\n")
-cat("Phase 1: Loading CCLE 2019\n")
+cat("Loading GCSI 2019\n")
 cat("==============================\n")
 
-ccle_2019 <- read_updated_rds(CCLE_2019_RDS_PATH)
+gcsi_2019 <- read_updated_rds(GCSI_2019_RDS_PATH)
+
+# -------------------------------------------------------------------------
+# Select samples/cell lines using external QC sheet new criteria only
+# -------------------------------------------------------------------------
 
 sheet_target_data <- read_qc_sheet_soft_tissue_targets(
   path = SHEET_CELL_LINE_QC_PATH,
   out_dir = OUT_DIR
 )
 
-selection_data <- build_ccle_2019_selection(
-  pset_2019 = ccle_2019,
+selection_data <- build_gcsi_selection(
+  pset_gcsi = gcsi_2019,
   target_cell_lines = TARGET_CELL_LINES,
   sheet_soft_tissue_metadata_dt = sheet_target_data$sheet_soft_tissue_metadata_dt,
   out_dir = OUT_DIR
@@ -1556,26 +1496,22 @@ selection_data <- build_ccle_2019_selection(
 
 selected_sample_dt <- selection_data$selected_sample_dt
 
-canonical_lookup <- build_canonical_lookup(selected_sample_dt)
+canonical_lookup <- build_canonical_lookup_gcsi(selected_sample_dt)
 
 cat("Final new-criteria selected sample rows:", nrow(selected_sample_dt), "\n")
 cat("Canonical lookup rows:", nrow(canonical_lookup), "\n")
 
-canonical_lookup_path <- file.path(OUT_DIR, "ccle_2019_canonical_lookup.csv")
-
 fwrite(
   canonical_lookup,
-  canonical_lookup_path
+  file.path(OUT_DIR, "gcsi_2019_canonical_lookup.csv")
 )
-
-cat("Wrote canonical lookup:", canonical_lookup_path, "\n")
 
 # -------------------------------------------------------------------------
 # pre_clinical_cell_line.csv from QC CSV metadata
 # -------------------------------------------------------------------------
 
 cell_line_dt <- data.table(
-  cell_line_name = clean_na(selected_sample_dt[["final_cell_line_name"]]),
+  cell_line_name = clean_na(selected_sample_dt[["canonical_cell_line_name"]]),
   tissueid = clean_na(selected_sample_dt[["sheet_tissueid"]]),
   mod_tissueid = clean_na(selected_sample_dt[["sheet_mod_tissueid"]]),
   accession = clean_na(selected_sample_dt[["sheet_accession"]]),
@@ -1631,32 +1567,78 @@ fwrite(
 
 cat("Wrote cell lines:", nrow(cell_line_dt), "\n")
 
-rm(cell_line_dt)
-gc(verbose = FALSE)
-
 # -------------------------------------------------------------------------
-# pre_clinical_sample.csv from CCLE 2019
+# pre_clinical_sample.csv
 # -------------------------------------------------------------------------
 
 sample_out_dt <- data.table(
-  id = prefix_sample_id(selected_sample_dt[["source_sampleid"]]),
-  cell_line_name = clean_na(selected_sample_dt[["final_cell_line_name"]]),
+  id = clean_na(selected_sample_dt[["canonical_sample_id"]]),
+  cell_line_name = clean_na(selected_sample_dt[["canonical_cell_line_name"]]),
 
-  site_primary = clean_na(selected_sample_dt[["CCLE.site_Primary"]]),
-  site_subtype1 = clean_na(selected_sample_dt[["CCLE.site_Subtype1"]]),
-  site_subtype2 = clean_na(selected_sample_dt[["CCLE.site_Subtype2"]]),
-  site_subtype3 = clean_na(selected_sample_dt[["CCLE.site_Subtype3"]]),
+  site_primary = clean_na(safe_col(
+    selected_sample_dt,
+    c("site_primary", "Site.Primary", "primary_site", "tissueid")
+  )),
 
-  histology = clean_na(selected_sample_dt[["CCLE.histology"]]),
-  histology_subtype1 = clean_na(selected_sample_dt[["CCLE.histology_Subtype1"]]),
-  histology_subtype2 = clean_na(selected_sample_dt[["CCLE.histology_Subtype2"]]),
-  histology_subtype3 = clean_na(selected_sample_dt[["CCLE.histology_Subtype3"]]),
+  site_subtype1 = clean_na(safe_col(
+    selected_sample_dt,
+    c("site_subtype1", "Site.Subtype1", "Site_Subtype1")
+  )),
 
-  gender = clean_na(selected_sample_dt[["CCLE.gender"]]),
-  age = parse_age_int(selected_sample_dt[["CCLE.age"]]),
-  race = clean_na(selected_sample_dt[["CCLE.race"]]),
-  diseases = clean_na(selected_sample_dt[["cellosaurus.diseases"]]),
-  disease_type = clean_na(selected_sample_dt[["CCLE.type"]])
+  site_subtype2 = clean_na(safe_col(
+    selected_sample_dt,
+    c("site_subtype2", "Site.Subtype2", "Site_Subtype2")
+  )),
+
+  site_subtype3 = clean_na(safe_col(
+    selected_sample_dt,
+    c("site_subtype3", "Site.Subtype3", "Site_Subtype3")
+  )),
+
+  histology = clean_na(safe_col(
+    selected_sample_dt,
+    c("histology", "Histology")
+  )),
+
+  histology_subtype1 = clean_na(safe_col(
+    selected_sample_dt,
+    c("histology_subtype1", "Hist.Subtype1", "Histology_Subtype1")
+  )),
+
+  histology_subtype2 = clean_na(safe_col(
+    selected_sample_dt,
+    c("histology_subtype2", "Hist.Subtype2", "Histology_Subtype2")
+  )),
+
+  histology_subtype3 = clean_na(safe_col(
+    selected_sample_dt,
+    c("histology_subtype3", "Hist.Subtype3", "Histology_Subtype3")
+  )),
+
+  gender = clean_na(safe_col(
+    selected_sample_dt,
+    c("gender", "Gender", "sex", "Sex")
+  )),
+
+  age = parse_age_int(safe_col(
+    selected_sample_dt,
+    c("age", "Age")
+  )),
+
+  race = clean_na(safe_col(
+    selected_sample_dt,
+    c("race", "Race")
+  )),
+
+  diseases = clean_na(safe_col(
+    selected_sample_dt,
+    c("diseases", "cellosaurus.diseases", "Disease", "disease")
+  )),
+
+  disease_type = clean_na(safe_col(
+    selected_sample_dt,
+    c("disease_type", "type", "tissueid")
+  ))
 )
 
 sample_out_dt <- sample_out_dt[!is.na(id)]
@@ -1669,33 +1651,77 @@ fwrite(
 
 cat("Wrote samples:", nrow(sample_out_dt), "\n")
 
-rm(sample_out_dt)
-gc(verbose = FALSE)
-
 # -------------------------------------------------------------------------
-# CCLE 2019 molecular profiles
+# Treatment response using summarizeSensitivityProfiles
 # -------------------------------------------------------------------------
 
-rnaseq_se <- ccle_2019@molecularProfiles[["rnaseq.gene_tpm"]]
-cnv_se <- ccle_2019@molecularProfiles[["cnv.gene_log2"]]
-mutation_se <- ccle_2019@molecularProfiles[["mutation.gene_binary"]]
+extract_treatment_response_gcsi(
+  pset_gcsi = gcsi_2019,
+  canonical_lookup = canonical_lookup,
+  out_path = file.path(OUT_DIR, "pre_clinical_treatment_response.csv")
+)
+
+# -------------------------------------------------------------------------
+# Existing GCSI molecular profiles only. No new molecular profiles are added.
+# -------------------------------------------------------------------------
+
+rnaseq_se <- require_profile(gcsi_2019, RNA_PROFILE_NAME)
+cnv_se <- require_profile(gcsi_2019, CNV_PROFILE_NAME)
+mutation_se <- require_profile(gcsi_2019, MUTATION_PROFILE_NAME)
+
+# -------------------------------------------------------------------------
+# Gene mappings
+# -------------------------------------------------------------------------
 
 rnaseq_gene_map <- make_gene_mapping(
   rnaseq_se,
-  ensembl_candidates = c("gene_id", "EnsemblGeneID", "EnsemblGeneId"),
-  name_candidates = c("gene_name", "gene_symbol", "Symbol")
+  ensembl_candidates = c(
+    "gene_id",
+    "EnsemblGeneID",
+    "EnsemblGeneId",
+    "ensembl_gene_id"
+  ),
+  name_candidates = c(
+    "gene_name",
+    "gene_symbol",
+    "Symbol",
+    "symbol",
+    "GeneSymbol"
+  )
 )
 
 cnv_gene_map <- make_gene_mapping(
   cnv_se,
-  ensembl_candidates = c("gene_id", "EnsemblGeneID", "EnsemblGeneId"),
-  name_candidates = c("gene_name", "gene_symbol", "Symbol")
+  ensembl_candidates = c(
+    "gene_id",
+    "EnsemblGeneID",
+    "EnsemblGeneId",
+    "ensembl_gene_id"
+  ),
+  name_candidates = c(
+    "gene_name",
+    "gene_symbol",
+    "Symbol",
+    "symbol",
+    "GeneSymbol"
+  )
 )
 
 mutation_gene_map <- make_gene_mapping(
   mutation_se,
-  ensembl_candidates = c("EnsemblGeneID", "EnsemblGeneId", "gene_id"),
-  name_candidates = c("gene_symbol", "Symbol", "gene_name")
+  ensembl_candidates = c(
+    "EnsemblGeneID",
+    "EnsemblGeneId",
+    "gene_id",
+    "ensembl_gene_id"
+  ),
+  name_candidates = c(
+    "gene_symbol",
+    "Symbol",
+    "symbol",
+    "gene_name",
+    "GeneSymbol"
+  )
 )
 
 write_gene_part(
@@ -1704,31 +1730,60 @@ write_gene_part(
     cnv_gene_map,
     mutation_gene_map
   ),
-  out_path = file.path(OUT_DIR, "pre_clinical_gene_2019_part.csv")
+  out_path = file.path(OUT_DIR, "pre_clinical_gene_gcsi_part.csv")
 )
 
-rnaseq_column_map <- build_profile_column_map(rnaseq_se, canonical_lookup)
-mutation_column_map <- build_profile_column_map(mutation_se, canonical_lookup)
-cnv_column_map <- build_profile_column_map(cnv_se, canonical_lookup)
+finalize_gene_table(
+  gene_part_paths = c(
+    file.path(OUT_DIR, "pre_clinical_gene_gcsi_part.csv")
+  ),
+  out_dir = OUT_DIR
+)
 
-cat("Matched CCLE 2019 RNA-seq columns:", nrow(rnaseq_column_map), "\n")
-cat("Matched CCLE 2019 mutation columns:", nrow(mutation_column_map), "\n")
-cat("Matched CCLE 2019 CNV columns:", nrow(cnv_column_map), "\n")
+# -------------------------------------------------------------------------
+# Molecular column maps
+# -------------------------------------------------------------------------
+
+rnaseq_column_map <- build_profile_column_map(
+  se = rnaseq_se,
+  canonical_lookup = canonical_lookup,
+  profile_label = "rnaseq"
+)
+
+cnv_column_map <- build_profile_column_map(
+  se = cnv_se,
+  canonical_lookup = canonical_lookup,
+  profile_label = "cnv"
+)
+
+mutation_column_map <- build_profile_column_map(
+  se = mutation_se,
+  canonical_lookup = canonical_lookup,
+  profile_label = "mutation"
+)
+
+cat("Matched GCSI RNA-seq columns:", nrow(rnaseq_column_map), "\n")
+cat("Matched GCSI CNV columns:", nrow(cnv_column_map), "\n")
+cat("Matched GCSI mutation columns:", nrow(mutation_column_map), "\n")
 
 fwrite(
   rnaseq_column_map,
-  file.path(OUT_DIR, "ccle_2019_rnaseq_column_map.csv")
-)
-
-fwrite(
-  mutation_column_map,
-  file.path(OUT_DIR, "ccle_2019_mutation_column_map.csv")
+  file.path(OUT_DIR, "gcsi_2019_rnaseq_column_map.csv")
 )
 
 fwrite(
   cnv_column_map,
-  file.path(OUT_DIR, "ccle_2019_cnv_column_map.csv")
+  file.path(OUT_DIR, "gcsi_2019_cnv_column_map.csv")
 )
+
+fwrite(
+  mutation_column_map,
+  file.path(OUT_DIR, "gcsi_2019_mutation_column_map.csv")
+)
+
+# -------------------------------------------------------------------------
+# pre_clinical_rna_seq.csv
+# -------------------------------------------------------------------------
 
 write_long_assay_with_column_map(
   se = rnaseq_se,
@@ -1741,20 +1796,11 @@ write_long_assay_with_column_map(
   column_chunk_size = 2
 )
 
-cat("Wrote CCLE 2019 RNA-seq assay CSV\n")
+cat("Wrote GCSI RNA-seq assay CSV\n")
 
-write_long_assay_with_column_map(
-  se = mutation_se,
-  gene_map = mutation_gene_map,
-  column_map = mutation_column_map,
-  out_path = file.path(OUT_DIR, "pre_clinical_mutation.csv"),
-  value_col = "value",
-  assay_name = "exprs",
-  value_as_character = TRUE,
-  column_chunk_size = 10
-)
-
-cat("Wrote CCLE 2019 mutation assay CSV\n")
+# -------------------------------------------------------------------------
+# pre_clinical_copy_number_variation.csv
+# -------------------------------------------------------------------------
 
 write_long_assay_with_column_map(
   se = cnv_se,
@@ -1767,16 +1813,33 @@ write_long_assay_with_column_map(
   column_chunk_size = 5
 )
 
-cat("Wrote CCLE 2019 CNV assay CSV\n")
+cat("Wrote GCSI CNV assay CSV\n")
 
 # -------------------------------------------------------------------------
-# Free CCLE 2019 memory before loading CCLE 2015
+# pre_clinical_mutation.csv
 # -------------------------------------------------------------------------
 
-cat("\nFreeing CCLE 2019 objects from memory\n")
+write_long_assay_with_column_map(
+  se = mutation_se,
+  gene_map = mutation_gene_map,
+  column_map = mutation_column_map,
+  out_path = file.path(OUT_DIR, "pre_clinical_mutation.csv"),
+  value_col = "value",
+  assay_name = "exprs",
+  value_as_character = TRUE,
+  column_chunk_size = 10
+)
+
+cat("Wrote GCSI mutation assay CSV\n")
+
+# -------------------------------------------------------------------------
+# Cleanup
+# -------------------------------------------------------------------------
+
+cat("\nFreeing GCSI objects from memory\n")
 
 rm(
-  ccle_2019,
+  gcsi_2019,
   selected_sample_dt,
   sheet_target_data,
   selection_data,
@@ -1788,128 +1851,10 @@ rm(
   cnv_gene_map,
   mutation_gene_map,
   rnaseq_column_map,
-  mutation_column_map,
-  cnv_column_map
+  cnv_column_map,
+  mutation_column_map
 )
 
 gc(verbose = TRUE)
 
-# -------------------------------------------------------------------------
-# Phase 2: Load CCLE 2015 only
-# -------------------------------------------------------------------------
-
-cat("\n==============================\n")
-cat("Phase 2: Loading CCLE 2015\n")
-cat("==============================\n")
-
-ccle_2015 <- read_updated_rds(CCLE_2015_RDS_PATH)
-
-canonical_lookup <- fread(canonical_lookup_path)
-
-# -------------------------------------------------------------------------
-# CCLE 2015 treatment response using summarizeSensitivityProfiles
-# -------------------------------------------------------------------------
-
-extract_treatment_response_2015(
-  pset_2015 = ccle_2015,
-  canonical_lookup = canonical_lookup,
-  out_path = file.path(OUT_DIR, "pre_clinical_treatment_response.csv")
-)
-
-# -------------------------------------------------------------------------
-# CCLE 2015 rna profile only: older microarray expression
-# -------------------------------------------------------------------------
-
-microarray_se <- ccle_2015@molecularProfiles[["rna"]]
-
-if (is.null(microarray_se)) {
-  stop(
-    "Could not find CCLE 2015 molecular profile named 'rna'. ",
-    "Available profiles are: ",
-    paste(names(ccle_2015@molecularProfiles), collapse = ", ")
-  )
-}
-
-cat("Selected CCLE 2015 microarray RNA profile: rna\n")
-
-microarray_gene_map <- make_gene_mapping(
-  microarray_se,
-  ensembl_candidates = c("EnsemblGeneId", "EnsemblGeneID", "gene_id"),
-  name_candidates = c("Symbol", "gene_symbol", "gene_name")
-)
-
-microarray_unmapped <- microarray_gene_map[
-  is.na(gene_id) | gene_id == "",
-  .(feature_id, gene_name)
-]
-
-fwrite(
-  microarray_unmapped,
-  file.path(OUT_DIR, "ccle_2015_microarray_unmapped_features.csv")
-)
-
-cat("CCLE 2015 microarray features without Ensembl ID:", nrow(microarray_unmapped), "\n")
-
-write_gene_part(
-  gene_maps = list(
-    microarray_gene_map
-  ),
-  out_path = file.path(OUT_DIR, "pre_clinical_gene_2015_microarray_part.csv")
-)
-
-microarray_column_map <- build_2015_rna_column_map(
-  rna_se = microarray_se,
-  pset_2015 = ccle_2015,
-  canonical_lookup = canonical_lookup
-)
-
-cat("Matched CCLE 2015 microarray RNA columns:", nrow(microarray_column_map), "\n")
-
-fwrite(
-  microarray_column_map,
-  file.path(OUT_DIR, "ccle_2015_microarray_column_map.csv")
-)
-
-write_long_assay_with_column_map(
-  se = microarray_se,
-  gene_map = microarray_gene_map,
-  column_map = microarray_column_map,
-  out_path = file.path(OUT_DIR, "pre_clinical_microarray.csv"),
-  value_col = "expression_value",
-  assay_name = "exprs",
-  value_as_character = FALSE,
-  column_chunk_size = 5
-)
-
-cat("Wrote CCLE 2015 microarray RNA assay CSV\n")
-
-# -------------------------------------------------------------------------
-# Free CCLE 2015 memory
-# -------------------------------------------------------------------------
-
-cat("\nFreeing CCLE 2015 objects from memory\n")
-
-rm(
-  ccle_2015,
-  canonical_lookup,
-  microarray_se,
-  microarray_gene_map,
-  microarray_unmapped,
-  microarray_column_map
-)
-
-gc(verbose = TRUE)
-
-# -------------------------------------------------------------------------
-# Finalize pre_clinical_gene.csv from small gene parts only
-# -------------------------------------------------------------------------
-
-finalize_gene_table(
-  gene_part_paths = c(
-    file.path(OUT_DIR, "pre_clinical_gene_2019_part.csv"),
-    file.path(OUT_DIR, "pre_clinical_gene_2015_microarray_part.csv")
-  ),
-  out_dir = OUT_DIR
-)
-
-cat("Finished extracting selected CCLE preclinical CSVs into:", OUT_DIR, "\n")
+cat("Finished extracting selected GCSI preclinical CSVs into:", OUT_DIR, "\n")
