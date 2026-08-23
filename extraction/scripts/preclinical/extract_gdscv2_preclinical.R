@@ -1,5 +1,6 @@
 suppressPackageStartupMessages({
   library(data.table)
+  library(SummarizedExperiment)
   library(PharmacoGx)
 })
 
@@ -15,46 +16,58 @@ if (exists("mem.maxVSize", mode = "function")) {
 # Config
 # -------------------------------------------------------------------------
 
-PRISM_RDS_PATH <- "extraction/data/raw/preclinical/PSet_PRISM.rds"
+DATASET_ID <- 1
+
+# You can override this from the shell if the filename differs:
+#   GDSCV2_RDS_PATH=/path/to/PSet_GDSCv2.rds Rscript extract_gdscv2_preclinical.R
+GDSCV2_RDS_PATH <- Sys.getenv(
+  "GDSCV2_RDS_PATH",
+  unset = "extraction/data/raw/preclinical/PSet_GDSCv2.rds"
+)
+
 SHEET_CELL_LINE_QC_PATH <- "extraction/data/raw/preclinical/All_PSets_sarcoma_cell_line_QC.csv"
 
-OUT_DIR <- "extraction/data/proc/preclinical/PRISM"
+OUT_DIR <- "extraction/data/proc/preclinical/GDSCv2"
 
 dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
-
-# Final sample IDs will look like:
-#   PRISM_<PRISM.sampleid>
-SAMPLE_ID_PREFIX <- "PRISM_"
 
 # New extraction set:
 #   1. Read external QC sheet.
 #   2. Keep rows where mod_tissueid == "Soft Tissue".
-#   3. Match sheet$cell_line against ONE resolved PRISM sample-slot cell-line column.
+#   3. Match sheet$cell_line against GDSCv2 sample-slot sampleid.
 SHEET_TARGET_CELL_LINE_COL <- "cell_line"
 
-# PRISM @sample$sampleid has been used as the cell-line / treatment-response key.
-# Keep it first. Only one resolved column is used for the new extraction match.
-PRISM_CELL_LINE_NAME_CANDIDATES <- c(
-  "sampleid",
-  "cell_line_name",
-  "Cell.line.primary.name",
-  "cellosaurus.cellLineName",
-  "cellLineName",
-  "cellline",
-  "Name",
-  "sample_rowname"
-)
+# Per requirement, GDSCv2 uses sample slot sampleid as both source sample ID
+# and final cell_line_name before adding the sample ID prefix.
+GDSCv2_CELL_LINE_NAME_CANDIDATES <- c("sampleid")
 
-# Original criteria are now audit-only.
+# Original criteria are audit-only.
 # They DO NOT control the final extraction set anymore.
 TARGET_CELL_LINES_RAW <- paste0(
-  "CHSA8926|GI-1|RD|Rh41|SKN|TE 125.T|105KC|GCT|KYM-1|Rh18|",
-  "SKN|SW872|Aska-SS|GCT|Hs 819.T|OUMS-27|Rh30|SF539|SKN"
+  "CAL-78|ESS-1|H-EMC-SS|Hs 633.T|Hs 819.T|KYM-1|MFH-ino|",
+  "NCI-H28|Rh18|SK-LMS-1|SNU-685|SW982|TE 441.T|CHSA0108|",
+  "DM-3|H-EMC-SS|Hs 819.T|MFH-ino|NCI-H2731|RKN|SK-LMS-1|",
+  "SW1353|TE 441.T|105KC|CHSA8926|DM-3|HT-1080|MFH-ino|",
+  "NCI-H2731|RD|SNU-1077|SW1353|SW982|105KC|CHSA0011|",
+  "CHSA0011|GCT|HT-1080|Hs 729.T|JJ012|MES-SA|NCI-H2052|",
+  "OUMS-27|Rh30|SK-UT-1|SW1353|SYO-1|TE 617.T|CHSA8926|",
+  "ESS-1|HT-1080|JJ012|NCI-H2052|NCI-H28|RS-5|SK-UT-1|",
+  "SW684|TE 617.T|A-204|CS-1 [Human chondrosarcoma]|ESS-1|",
+  "Hs 633.T|NCI-H2052|NCI-H28|RKN|SNU-685|SW684|SYO-1|",
+  "A-204|CHSA0108"
 )
 
 TARGET_CELL_LINES <- unique(trimws(
   unlist(strsplit(TARGET_CELL_LINES_RAW, "\\|"))
 ))
+
+# Final output sample IDs will look like gdsc_A-204, gdsc_CAL-78, etc.
+SAMPLE_ID_PREFIX <- "gdsc_"
+
+RNA_SEQ_PROFILE_NAME <- "Kallisto_0.46.1.rnaseq"
+MICROARRAY_PROFILE_NAME <- "rna"
+CNV_PROFILE_NAME <- "cnv"
+MUTATION_PROFILE_NAME <- "mutation"
 
 # -------------------------------------------------------------------------
 # General helpers
@@ -86,6 +99,12 @@ parse_age_int <- function(x) {
   suppressWarnings(as.integer(gsub("[^0-9]", "", x)))
 }
 
+strip_ensembl_version <- function(x) {
+  x <- as.character(x)
+  x[x == "" | x == "NA" | is.na(x)] <- NA_character_
+  sub("\\.[0-9]+$", "", x)
+}
+
 normalize_cell_line_name <- function(x) {
   x <- as.character(x)
   x <- trimws(x)
@@ -108,15 +127,15 @@ normalize_category_value <- function(x) {
   x
 }
 
-make_prefixed_sample_id <- function(sampleid) {
-  sampleid <- clean_na(sampleid)
-  out <- rep(NA_character_, length(sampleid))
-  keep_idx <- !is.na(sampleid)
+make_prefixed_sample_id <- function(cell_line_name) {
+  cell_line_name <- clean_na(cell_line_name)
+  out <- rep(NA_character_, length(cell_line_name))
+  keep_idx <- !is.na(cell_line_name)
 
   out[keep_idx] <- ifelse(
-    startsWith(sampleid[keep_idx], SAMPLE_ID_PREFIX),
-    sampleid[keep_idx],
-    paste0(SAMPLE_ID_PREFIX, sampleid[keep_idx])
+    startsWith(cell_line_name[keep_idx], SAMPLE_ID_PREFIX),
+    cell_line_name[keep_idx],
+    paste0(SAMPLE_ID_PREFIX, cell_line_name[keep_idx])
   )
 
   out
@@ -160,17 +179,78 @@ coalesce_dt_cols <- function(dt, candidates) {
   out
 }
 
-resolve_prism_cell_line_col <- function(sample_dt) {
+get_rowdata_col <- function(se, candidates) {
+  rd <- as.data.frame(rowData(se))
+
+  for (candidate in candidates) {
+    if (candidate %in% colnames(rd)) {
+      return(as.character(rd[[candidate]]))
+    }
+  }
+
+  rep(NA_character_, nrow(se))
+}
+
+make_gene_mapping <- function(se, ensembl_candidates, name_candidates) {
+  feature_id <- rownames(se)
+
+  gene_id <- get_rowdata_col(se, ensembl_candidates)
+  gene_name <- get_rowdata_col(se, name_candidates)
+
+  gene_id <- strip_ensembl_version(gene_id)
+  gene_name <- clean_na(gene_name)
+
+  # Fallback: if rownames are Ensembl IDs, use rownames as gene_id.
+  feature_as_ensembl <- strip_ensembl_version(feature_id)
+
+  use_feature_id <- (
+    is.na(gene_id) |
+      gene_id == ""
+  ) & grepl("^ENSG[0-9]+$", feature_as_ensembl)
+
+  gene_id[use_feature_id] <- feature_as_ensembl[use_feature_id]
+
+  data.table(
+    feature_id = feature_id,
+    gene_id = gene_id,
+    gene_name = gene_name
+  )
+}
+
+get_assay_matrix <- function(se, assay_name = "exprs") {
+  if (!(assay_name %in% assayNames(se))) {
+    assay_name <- assayNames(se)[1]
+  }
+
+  assay(se, assay_name)
+}
+
+require_profile <- function(pset, profile_name) {
+  profile <- pset@molecularProfiles[[profile_name]]
+
+  if (is.null(profile)) {
+    stop(
+      "Could not find molecular profile named '",
+      profile_name,
+      "'. Available profiles are: ",
+      paste(names(pset@molecularProfiles), collapse = ", ")
+    )
+  }
+
+  profile
+}
+
+resolve_gdscv2_cell_line_col <- function(sample_dt) {
   col <- first_existing_col(
     sample_dt,
-    PRISM_CELL_LINE_NAME_CANDIDATES
+    GDSCv2_CELL_LINE_NAME_CANDIDATES
   )
 
   if (is.na(col)) {
     stop(
-      "Could not find a PRISM sample-slot cell-line-name column. ",
+      "Could not find a GDSCv2 sample-slot cell-line-name column. ",
       "Expected one of: ",
-      paste(PRISM_CELL_LINE_NAME_CANDIDATES, collapse = ", "),
+      paste(GDSCv2_CELL_LINE_NAME_CANDIDATES, collapse = ", "),
       ". Available columns are: ",
       paste(colnames(sample_dt), collapse = ", ")
     )
@@ -197,7 +277,7 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
 
   fwrite(
     data.table(column_name = colnames(sheet_dt)),
-    file.path(out_dir, "prism_sheet_column_names.csv")
+    file.path(out_dir, "gdscv2_sheet_column_names.csv")
   )
 
   required_cols <- c(
@@ -213,7 +293,7 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
       "QC sheet is missing required columns: ",
       paste(missing_required, collapse = ", "),
       ". See: ",
-      file.path(out_dir, "prism_sheet_column_names.csv")
+      file.path(out_dir, "gdscv2_sheet_column_names.csv")
     )
   }
 
@@ -259,13 +339,10 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
       .SD,
       c(
         "Cellosaurus.Accession.id",
-        "Cellosaurus.Accession.ID",
         "cellosaurus.cvcl_id",
         "cellosaurus.cellosaurus.cvcl_id",
         "cellosaurus.accession",
-        "cellosaurus.accession.id",
-        "accession",
-        "cell_line_accession"
+        "accession"
       )
     ))
   ]
@@ -277,7 +354,6 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
       c(
         "cellosaurus.category",
         "cellosaurus.cellosaurus.category",
-        "Cellosaurus.Category",
         "CellLine.Type",
         "category"
       )
@@ -292,7 +368,6 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
         "cellosaurus.sex",
         "cellosaurus.cellosaurus.sex",
         "cellosaurus.sexOfCell",
-        "Cellosaurus.Sex",
         "Gender",
         "gender",
         "Sex",
@@ -309,7 +384,6 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
         "cellosaurus.age",
         "cellosaurus.cellosaurus.age",
         "cellosaurus.ageAtSampling",
-        "Cellosaurus.Age",
         "Age",
         "age"
       )
@@ -334,13 +408,9 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
   sheet_soft_tissue_dt[
     ,
     metadata_priority := fifelse(
-      !is.na(sheet_dataset_value) & grepl("PRISM", toupper(sheet_dataset_value)),
+      grepl("GDSC", toupper(sheet_dataset_value)),
       1L,
-      fifelse(
-        !is.na(sheet_object_type_value) & grepl("PRISM", toupper(sheet_object_type_value)),
-        2L,
-        99L
-      )
+      fifelse(grepl("GDSC", toupper(sheet_object_type_value)), 2L, 99L)
     )
   ]
 
@@ -371,12 +441,12 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
 
   fwrite(
     sheet_soft_tissue_dt,
-    file.path(out_dir, "prism_sheet_soft_tissue_rows.csv")
+    file.path(out_dir, "gdscv2_sheet_soft_tissue_rows.csv")
   )
 
   fwrite(
     sheet_soft_tissue_metadata_dt,
-    file.path(out_dir, "prism_sheet_soft_tissue_cell_line_metadata.csv")
+    file.path(out_dir, "gdscv2_sheet_soft_tissue_cell_line_metadata.csv")
   )
 
   fwrite(
@@ -398,7 +468,7 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
         )
       ]
     ),
-    file.path(out_dir, "prism_sheet_soft_tissue_cell_line_targets.csv")
+    file.path(out_dir, "gdscv2_sheet_soft_tissue_cell_line_targets.csv")
   )
 
   cat("QC-sheet soft tissue rows:", nrow(sheet_soft_tissue_dt), "\n")
@@ -411,51 +481,48 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
 }
 
 # -------------------------------------------------------------------------
-# PRISM sample selection and original-criteria audit
+# GDSCv2 sample selection and original-criteria audit
 # -------------------------------------------------------------------------
 
-build_prism_selection <- function(
-  pset_prism,
+build_gdscv2_selection <- function(
+  pset_gdscv2,
   target_cell_lines,
   sheet_soft_tissue_metadata_dt,
   out_dir
 ) {
-  sample_dt <- as.data.table(
-    pset_prism@sample,
-    keep.rownames = "sample_rowname"
-  )
+  sample_dt <- as.data.table(pset_gdscv2@sample, keep.rownames = "sample_rowname")
 
   fwrite(
     data.table(column_name = colnames(sample_dt)),
-    file.path(out_dir, "prism_sample_slot_columns.csv")
+    file.path(out_dir, "gdscv2_sample_slot_columns.csv")
   )
 
-  prism_cell_line_col <- resolve_prism_cell_line_col(sample_dt)
+  gdscv2_cell_line_col <- resolve_gdscv2_cell_line_col(sample_dt)
 
   fwrite(
     data.table(
-      prism_cell_line_name_column_used = prism_cell_line_col
+      gdscv2_cell_line_name_column_used = gdscv2_cell_line_col
     ),
-    file.path(out_dir, "prism_cell_line_name_column_used.csv")
+    file.path(out_dir, "gdscv2_cell_line_name_column_used.csv")
   )
 
   sample_dt[
     ,
-    prism_cell_line_name := clean_na(get(prism_cell_line_col))
+    gdscv2_cell_line_name := clean_na(get(gdscv2_cell_line_col))
   ]
 
   sample_dt[
     ,
-    normalized_prism_cell_line_name := normalize_cell_line_name(prism_cell_line_name)
+    normalized_gdscv2_cell_line_name := normalize_cell_line_name(gdscv2_cell_line_name)
   ]
 
   # New extraction criterion only:
   # QC sheet mod_tissueid == "Soft Tissue", matched by sheet$cell_line to the
-  # one resolved PRISM sample-slot cell-line-name column.
+  # one resolved GDSCv2 sample-slot cell-line-name column.
   sample_dt[
     ,
     new_sheet_soft_tissue_match :=
-      normalized_prism_cell_line_name %in%
+      normalized_gdscv2_cell_line_name %in%
         sheet_soft_tissue_metadata_dt$normalized_sheet_cell_line_name
   ]
 
@@ -465,9 +532,9 @@ build_prism_selection <- function(
 
   if (nrow(selected_sample_dt) == 0) {
     stop(
-      "No PRISM samples matched QC-sheet mod_tissueid == 'Soft Tissue' ",
-      "cell lines using PRISM sample-slot column: ",
-      prism_cell_line_col
+      "No GDSCv2 samples matched QC-sheet mod_tissueid == 'Soft Tissue' ",
+      "cell lines using GDSCv2 sample-slot column: ",
+      gdscv2_cell_line_col
     )
   }
 
@@ -489,19 +556,17 @@ build_prism_selection <- function(
         sheet_age = age_raw
       )
     ],
-    by.x = "normalized_prism_cell_line_name",
+    by.x = "normalized_gdscv2_cell_line_name",
     by.y = "normalized_sheet_cell_line_name",
     all.x = TRUE
   )
 
+  # Per GDSCv2 requirement, the PharmacoSet sample slot sampleid is the
+  # canonical source sample ID and cell-line name. QC sheet metadata is used
+  # only for selecting rows and adding tissue/accession metadata.
   selected_sample_dt[
     ,
-    canonical_cell_line_name := clean_na(sheet_cell_line_name)
-  ]
-
-  selected_sample_dt[
-    is.na(canonical_cell_line_name),
-    canonical_cell_line_name := prism_cell_line_name
+    canonical_cell_line_name := clean_na(gdscv2_cell_line_name)
   ]
 
   selected_sample_dt[
@@ -509,49 +574,14 @@ build_prism_selection <- function(
     final_cell_line_name := canonical_cell_line_name
   ]
 
-  # For PRISM, the sample slot's sampleid is the cell-line / treatment-response key.
   selected_sample_dt[
     ,
-    source_sampleid := clean_na(safe_col(.SD, c("sampleid", prism_cell_line_col), n = .N))
-  ]
-
-  selected_sample_dt[
-    is.na(source_sampleid),
     source_sampleid := canonical_cell_line_name
   ]
 
-  # For PRISM database sample ID, use PRISM.sampleid when present, otherwise the
-  # resolved source_sampleid. Keep this separate from the treatment key.
   selected_sample_dt[
     ,
-    canonical_sample_source_id := clean_na(safe_col(.SD, c("PRISM.sampleid"), n = .N))
-  ]
-
-  selected_sample_dt[
-    is.na(canonical_sample_source_id),
-    canonical_sample_source_id := source_sampleid
-  ]
-
-  selected_sample_dt[
-    ,
-    canonical_sample_id := make_prefixed_sample_id(canonical_sample_source_id)
-  ]
-
-  selected_sample_dt[
-    ,
-    treatment_response_sample_key := source_sampleid
-  ]
-
-  selected_sample_dt[
-    ,
-    normalized_treatment_response_sample_key := normalize_cell_line_name(treatment_response_sample_key)
-  ]
-
-  selected_sample_dt <- selected_sample_dt[
-    !is.na(canonical_sample_source_id) &
-      !is.na(canonical_sample_id) &
-      !is.na(canonical_cell_line_name) &
-      !is.na(treatment_response_sample_key)
+    canonical_sample_id := make_prefixed_sample_id(source_sampleid)
   ]
 
   # -----------------------------------------------------------------------
@@ -561,13 +591,18 @@ build_prism_selection <- function(
 
   original_target_norm <- normalize_cell_line_name(target_cell_lines)
 
+  # Original target-list audit is intentionally only against sampleid.
+  original_candidate_cols <- c("sampleid")
+
   sample_dt[, original_target_match := FALSE]
 
-  if (has_col(sample_dt, "sampleid")) {
-    sample_dt[
-      normalize_cell_line_name(sampleid) %in% original_target_norm,
-      original_target_match := TRUE
-    ]
+  for (col in original_candidate_cols) {
+    if (has_col(sample_dt, col)) {
+      sample_dt[
+        normalize_cell_line_name(get(col)) %in% original_target_norm,
+        original_target_match := TRUE
+      ]
+    }
   }
 
   sample_dt[, original_soft_tissue_match := FALSE]
@@ -579,16 +614,16 @@ build_prism_selection <- function(
     ]
   }
 
-  if (has_col(sample_dt, "PRISM.tissueid")) {
+  if (has_col(sample_dt, "GDSC..Tissue.descriptor.1")) {
     sample_dt[
-      normalize_category_value(`PRISM.tissueid`) == "soft_tissue",
+      normalize_category_value(get("GDSC..Tissue.descriptor.1")) == "soft_tissue",
       original_soft_tissue_match := TRUE
     ]
   }
 
-  if (has_col(sample_dt, "primary_tissue")) {
+  if (has_col(sample_dt, "GDSC..Tissue..descriptor.2")) {
     sample_dt[
-      normalize_category_value(primary_tissue) == "soft_tissue",
+      normalize_category_value(get("GDSC..Tissue..descriptor.2")) == "soft_tissue_other",
       original_soft_tissue_match := TRUE
     ]
   }
@@ -600,7 +635,7 @@ build_prism_selection <- function(
 
   original_criteria_dt[
     ,
-    original_cell_line_name := prism_cell_line_name
+    original_cell_line_name := gdscv2_cell_line_name
   ]
 
   original_criteria_dt[
@@ -619,15 +654,14 @@ build_prism_selection <- function(
   original_audit_dt <- data.table(
     source_sampleid = clean_na(coalesce_dt_cols(
       original_criteria_dt,
-      c("sampleid", prism_cell_line_col, "sample_rowname")
+      c("sampleid", "sample_id", "cellid", "id", "sample_rowname")
     )),
-    source_prism_sampleid = clean_na(safe_col(original_criteria_dt, c("PRISM.sampleid"))),
-    sample_id = make_prefixed_sample_id(clean_na(safe_col(original_criteria_dt, c("PRISM.sampleid", "sampleid", prism_cell_line_col)))),
+    sample_id = make_prefixed_sample_id(clean_na(original_criteria_dt$original_cell_line_name)),
     cell_line_name = clean_na(original_criteria_dt$original_cell_line_name),
-    prism_cell_line_name_column_used = prism_cell_line_col,
+    gdscv2_cell_line_name_column_used = gdscv2_cell_line_col,
     tissueid = clean_na(safe_col(original_criteria_dt, c("tissueid"))),
-    PRISM.tissueid = clean_na(safe_col(original_criteria_dt, c("PRISM.tissueid"))),
-    primary_tissue = clean_na(safe_col(original_criteria_dt, c("primary_tissue"))),
+    gdsc_tissue_descriptor_1 = clean_na(safe_col(original_criteria_dt, c("GDSC..Tissue.descriptor.1"))),
+    gdsc_tissue_descriptor_2 = clean_na(safe_col(original_criteria_dt, c("GDSC..Tissue..descriptor.2"))),
     original_target_match = original_criteria_dt$original_target_match,
     original_soft_tissue_match = original_criteria_dt$original_soft_tissue_match
   )
@@ -635,27 +669,26 @@ build_prism_selection <- function(
   original_not_in_final_audit_dt <- data.table(
     source_sampleid = clean_na(coalesce_dt_cols(
       original_not_in_final_dt,
-      c("sampleid", prism_cell_line_col, "sample_rowname")
+      c("sampleid", "sample_id", "cellid", "id", "sample_rowname")
     )),
-    source_prism_sampleid = clean_na(safe_col(original_not_in_final_dt, c("PRISM.sampleid"))),
-    sample_id = make_prefixed_sample_id(clean_na(safe_col(original_not_in_final_dt, c("PRISM.sampleid", "sampleid", prism_cell_line_col)))),
+    sample_id = make_prefixed_sample_id(clean_na(original_not_in_final_dt$original_cell_line_name)),
     cell_line_name = clean_na(original_not_in_final_dt$original_cell_line_name),
-    prism_cell_line_name_column_used = prism_cell_line_col,
+    gdscv2_cell_line_name_column_used = gdscv2_cell_line_col,
     tissueid = clean_na(safe_col(original_not_in_final_dt, c("tissueid"))),
-    PRISM.tissueid = clean_na(safe_col(original_not_in_final_dt, c("PRISM.tissueid"))),
-    primary_tissue = clean_na(safe_col(original_not_in_final_dt, c("primary_tissue"))),
+    gdsc_tissue_descriptor_1 = clean_na(safe_col(original_not_in_final_dt, c("GDSC..Tissue.descriptor.1"))),
+    gdsc_tissue_descriptor_2 = clean_na(safe_col(original_not_in_final_dt, c("GDSC..Tissue..descriptor.2"))),
     original_target_match = original_not_in_final_dt$original_target_match,
     original_soft_tissue_match = original_not_in_final_dt$original_soft_tissue_match
   )
 
   fwrite(
     original_audit_dt,
-    file.path(out_dir, "prism_original_criteria_cell_line_list_audit_only.csv")
+    file.path(out_dir, "gdscv2_original_criteria_cell_line_list_audit_only.csv")
   )
 
   fwrite(
     original_not_in_final_audit_dt,
-    file.path(out_dir, "prism_original_criteria_not_in_final_new_criteria.csv")
+    file.path(out_dir, "gdscv2_original_criteria_not_in_final_new_criteria.csv")
   )
 
   fwrite(
@@ -663,11 +696,10 @@ build_prism_selection <- function(
       ,
       .(
         sample_id = canonical_sample_id,
-        source_prism_sampleid = canonical_sample_source_id,
         source_sampleid,
         cell_line_name = final_cell_line_name,
-        prism_cell_line_name,
-        prism_cell_line_name_column_used = prism_cell_line_col,
+        gdscv2_cell_line_name,
+        gdscv2_cell_line_name_column_used = gdscv2_cell_line_col,
         sheet_cell_line_name,
         sheet_dataset,
         sheet_object_type,
@@ -680,16 +712,16 @@ build_prism_selection <- function(
         sheet_age
       )
     ],
-    file.path(out_dir, "prism_final_extracted_cell_line_list_new_criteria.csv")
+    file.path(out_dir, "gdscv2_final_extracted_cell_line_list_new_criteria.csv")
   )
 
   fwrite(
     selected_sample_dt,
-    file.path(out_dir, "prism_selected_sample_slot_rows.csv")
+    file.path(out_dir, "gdscv2_selected_sample_slot_rows.csv")
   )
 
-  cat("PRISM cell-line-name column used:", prism_cell_line_col, "\n")
-  cat("Final new-criteria selected PRISM sample rows:", nrow(selected_sample_dt), "\n")
+  cat("GDSCv2 cell-line-name column used:", gdscv2_cell_line_col, "\n")
+  cat("Final new-criteria selected GDSCv2 sample rows:", nrow(selected_sample_dt), "\n")
   cat("Original-criteria audit rows:", nrow(original_criteria_dt), "\n")
   cat("Original-criteria rows not in final new criteria:", nrow(original_not_in_final_dt), "\n")
 
@@ -697,36 +729,30 @@ build_prism_selection <- function(
     selected_sample_dt = selected_sample_dt,
     original_criteria_dt = original_criteria_dt,
     original_not_in_final_dt = original_not_in_final_dt,
-    prism_cell_line_col = prism_cell_line_col
+    gdscv2_cell_line_col = gdscv2_cell_line_col
   )
 }
 
-build_canonical_lookup_prism <- function(selected_sample_dt) {
+build_canonical_lookup_gdscv2 <- function(selected_sample_dt) {
   alt_cols <- c(
-    # Most important for treatment-response sample/cell-line matching.
-    "sampleid",
-    "treatment_response_sample_key",
-    "source_sampleid",
-
-    # Final PRISM output IDs.
-    "PRISM.sampleid",
-    "canonical_sample_source_id",
-    "canonical_sample_id",
-
-    # Final/canonical cell-line names.
     "canonical_cell_line_name",
     "final_cell_line_name",
-    "prism_cell_line_name",
-    "sheet_cell_line_name",
-
-    # Other possible aliases.
-    "sample_rowname",
+    "canonical_sample_id",
+    "source_sampleid",
+    "gdscv2_cell_line_name",
     "cellosaurus.cellLineName",
     "Cell.line.primary.name",
     "cell_line_name",
     "cellLineName",
     "cellline",
-    "Name"
+    "cellid",
+    "sampleid",
+    "sample_id",
+    "id",
+    "Name",
+    "CCLE.name",
+    "rownames",
+    "sample_rowname"
   )
 
   pieces <- list()
@@ -736,18 +762,9 @@ build_canonical_lookup_prism <- function(selected_sample_dt) {
       pieces[[col]] <- data.table(
         lookup_name = clean_na(selected_sample_dt[[col]]),
         normalized_lookup_name = normalize_cell_line_name(selected_sample_dt[[col]]),
-
-        # Final prefixed sample ID used in pre_clinical_sample.csv.
         sample_id = selected_sample_dt$canonical_sample_id,
-
-        # Original PRISM.sampleid used to construct final sample ID.
-        source_prism_sampleid = selected_sample_dt$canonical_sample_source_id,
-
-        # sampleid / resolved sample-slot cell-line key.
-        source_sampleid = selected_sample_dt$treatment_response_sample_key,
-
+        source_sampleid = selected_sample_dt$source_sampleid,
         cell_line_name = selected_sample_dt$canonical_cell_line_name,
-
         source_column = col
       )
     }
@@ -758,7 +775,6 @@ build_canonical_lookup_prism <- function(selected_sample_dt) {
   lookup_dt <- lookup_dt[
     !is.na(normalized_lookup_name) &
       !is.na(sample_id) &
-      !is.na(source_prism_sampleid) &
       !is.na(source_sampleid) &
       !is.na(cell_line_name)
   ]
@@ -770,7 +786,392 @@ build_canonical_lookup_prism <- function(selected_sample_dt) {
 }
 
 # -------------------------------------------------------------------------
-# PRISM treatment response using summarizeSensitivityProfiles
+# Molecular profile column mapping
+# -------------------------------------------------------------------------
+
+build_profile_column_map <- function(se, canonical_lookup, profile_label) {
+  cd <- as.data.table(
+    as.data.frame(colData(se)),
+    keep.rownames = "coldata_rownames"
+  )
+
+  cd[, colname := colnames(se)]
+
+  fwrite(
+    data.table(column_name = colnames(cd)),
+    file.path(OUT_DIR, paste0("gdscv2_", profile_label, "_coldata_columns.csv"))
+  )
+
+  candidate_cols <- c(
+    "cellosaurus.cellLineName",
+    "Cell.line.primary.name",
+    "cell_line_name",
+    "cellLineName",
+    "cellline",
+    "Cell_Line",
+    "sampleid",
+    "sample_id",
+    "ccle_sample_id",
+    "dataset_sample_id",
+    "cellid",
+    "id",
+    "Name",
+    "CCLE.name",
+    "samplename",
+    "rownames",
+    "coldata_rownames",
+    "colname"
+  )
+
+  pieces <- list()
+
+  for (col in candidate_cols) {
+    if (has_col(cd, col)) {
+      pieces[[col]] <- data.table(
+        colname = cd$colname,
+        matched_column = col,
+        normalized_lookup_name = normalize_cell_line_name(cd[[col]])
+      )
+    }
+  }
+
+  if (length(pieces) == 0) {
+    warning(
+      "No candidate mapping columns found in colData for profile ",
+      profile_label,
+      ". See gdscv2_",
+      profile_label,
+      "_coldata_columns.csv."
+    )
+
+    return(data.table(
+      colname = character(),
+      sample_id = character(),
+      source_sampleid = character(),
+      cell_line_name = character(),
+      matched_column = character()
+    ))
+  }
+
+  candidate_map <- rbindlist(pieces, fill = TRUE)
+  candidate_map <- candidate_map[!is.na(normalized_lookup_name)]
+
+  canonical_lookup_unique <- unique(
+    canonical_lookup[, .(normalized_lookup_name, sample_id, source_sampleid, cell_line_name)],
+    by = "normalized_lookup_name"
+  )
+
+  mapped <- merge(
+    candidate_map,
+    canonical_lookup_unique,
+    by = "normalized_lookup_name",
+    all = FALSE
+  )
+
+  mapped <- mapped[colname %in% colnames(se)]
+
+  mapped <- unique(mapped, by = "colname")
+
+  mapped[, .(colname, sample_id, source_sampleid, cell_line_name, matched_column)]
+}
+
+# -------------------------------------------------------------------------
+# Chunked long-assay writer
+# -------------------------------------------------------------------------
+
+write_long_assay_with_column_map <- function(
+  se,
+  gene_map,
+  column_map,
+  out_path,
+  value_col,
+  assay_name = "exprs",
+  value_as_character = FALSE,
+  column_chunk_size = 5
+) {
+  duplicate_pair_path <- sub("\\.csv$", "_duplicate_sample_gene_pairs.csv", out_path)
+
+  if (file.exists(duplicate_pair_path)) {
+    file.remove(duplicate_pair_path)
+  }
+
+  duplicate_pair_first_write <- TRUE
+
+  if (nrow(column_map) == 0) {
+    empty_dt <- data.table(
+      sample_id = character(),
+      gene_id = character()
+    )
+
+    empty_dt[[value_col]] <- if (value_as_character) character() else numeric()
+
+    fwrite(empty_dt, out_path)
+
+    fwrite(
+      data.table(
+        sample_id = character(),
+        gene_id = character(),
+        N = integer()
+      ),
+      duplicate_pair_path
+    )
+
+    return(invisible(NULL))
+  }
+
+  if (!(assay_name %in% assayNames(se))) {
+    assay_name <- assayNames(se)[1]
+  }
+
+  gene_map <- copy(gene_map)
+  gene_map[, gene_id := strip_ensembl_version(gene_id)]
+
+  gene_map <- gene_map[
+    !is.na(feature_id) &
+      !is.na(gene_id) &
+      gene_id != ""
+  ]
+
+  duplicate_samples <- column_map[, .N, by = sample_id][N > 1]
+
+  if (nrow(duplicate_samples) > 0) {
+    duplicate_path <- sub("\\.csv$", "_duplicate_sample_columns.csv", out_path)
+
+    fwrite(
+      duplicate_samples,
+      duplicate_path
+    )
+
+    warning(
+      "Some source columns mapped to the same sample_id for ",
+      out_path,
+      ". Keeping the first source column per sample_id. ",
+      "See: ",
+      duplicate_path
+    )
+  }
+
+  column_map <- unique(column_map, by = "sample_id")
+  column_map <- column_map[colname %in% colnames(se)]
+
+  selected_cols <- column_map$colname
+
+  if (length(selected_cols) == 0) {
+    empty_dt <- data.table(
+      sample_id = character(),
+      gene_id = character()
+    )
+
+    empty_dt[[value_col]] <- if (value_as_character) character() else numeric()
+
+    fwrite(empty_dt, out_path)
+
+    fwrite(
+      data.table(
+        sample_id = character(),
+        gene_id = character(),
+        N = integer()
+      ),
+      duplicate_pair_path
+    )
+
+    return(invisible(NULL))
+  }
+
+  if (file.exists(out_path)) {
+    file.remove(out_path)
+  }
+
+  first_write <- TRUE
+
+  for (start_idx in seq(1, length(selected_cols), by = column_chunk_size)) {
+    end_idx <- min(start_idx + column_chunk_size - 1, length(selected_cols))
+    chunk_cols <- selected_cols[start_idx:end_idx]
+
+    cat(
+      "Writing ",
+      basename(out_path),
+      " columns ",
+      start_idx,
+      "-",
+      end_idx,
+      " of ",
+      length(selected_cols),
+      "\n",
+      sep = ""
+    )
+
+    chunk_map <- column_map[colname %in% chunk_cols]
+
+    mat_chunk <- assay(se, assay_name)[, chunk_cols, drop = FALSE]
+
+    dt <- as.data.table(as.table(mat_chunk))
+    setnames(dt, c("feature_id", "source_colname", value_col))
+
+    dt[, feature_id := as.character(feature_id)]
+    dt[, source_colname := as.character(source_colname)]
+
+    dt <- merge(
+      dt,
+      chunk_map[, .(source_colname = colname, sample_id)],
+      by = "source_colname",
+      all.x = TRUE
+    )
+
+    dt <- merge(
+      dt,
+      gene_map[, .(feature_id, gene_id)],
+      by = "feature_id",
+      all.x = TRUE
+    )
+
+    dt[, source_colname := NULL]
+    dt[, feature_id := NULL]
+    dt[, gene_id := strip_ensembl_version(gene_id)]
+
+    dt <- dt[
+      !is.na(sample_id) &
+        !is.na(gene_id) &
+        gene_id != "" &
+        !is.na(get(value_col))
+    ]
+
+    duplicate_pairs_chunk <- dt[
+      ,
+      .N,
+      by = .(sample_id, gene_id)
+    ][N > 1]
+
+    fwrite(
+      duplicate_pairs_chunk,
+      duplicate_pair_path,
+      append = !duplicate_pair_first_write,
+      col.names = duplicate_pair_first_write
+    )
+
+    duplicate_pair_first_write <- FALSE
+
+    if (value_as_character) {
+      dt[, (value_col) := as.character(get(value_col))]
+
+      dt <- dt[
+        ,
+        .SD[1],
+        by = .(sample_id, gene_id)
+      ]
+    } else {
+      dt[, (value_col) := suppressWarnings(as.numeric(get(value_col)))]
+
+      dt <- dt[
+        ,
+        .(
+          value_tmp = mean(get(value_col), na.rm = TRUE)
+        ),
+        by = .(sample_id, gene_id)
+      ]
+
+      setnames(dt, "value_tmp", value_col)
+    }
+
+    setcolorder(dt, c("sample_id", "gene_id", value_col))
+
+    fwrite(
+      dt,
+      out_path,
+      append = !first_write,
+      col.names = first_write
+    )
+
+    first_write <- FALSE
+
+    rm(mat_chunk, dt, chunk_map, duplicate_pairs_chunk)
+    gc(verbose = FALSE)
+  }
+
+  if (!file.exists(duplicate_pair_path)) {
+    fwrite(
+      data.table(
+        sample_id = character(),
+        gene_id = character(),
+        N = integer()
+      ),
+      duplicate_pair_path
+    )
+  }
+
+  invisible(NULL)
+}
+
+# -------------------------------------------------------------------------
+# Gene table helpers
+# -------------------------------------------------------------------------
+
+write_gene_part <- function(gene_maps, out_path) {
+  gene_dt <- rbindlist(
+    lapply(
+      gene_maps,
+      function(gene_map) {
+        gene_map[, .(id = gene_id, name = gene_name)]
+      }
+    ),
+    fill = TRUE
+  )
+
+  gene_dt[, id := strip_ensembl_version(id)]
+  gene_dt[, name := clean_na(name)]
+
+  gene_dt <- gene_dt[!is.na(id) & id != ""]
+
+  fwrite(gene_dt, out_path)
+
+  cat("Wrote gene part:", out_path, "rows:", nrow(gene_dt), "\n")
+}
+
+finalize_gene_table <- function(gene_part_paths, out_dir) {
+  existing_paths <- gene_part_paths[file.exists(gene_part_paths)]
+
+  if (length(existing_paths) == 0) {
+    stop("No gene part files found to finalize pre_clinical_gene.csv.")
+  }
+
+  gene_dt <- rbindlist(
+    lapply(existing_paths, fread),
+    fill = TRUE
+  )
+
+  gene_dt[, id := strip_ensembl_version(id)]
+  gene_dt[, name := clean_na(name)]
+
+  gene_dt <- gene_dt[!is.na(id) & id != ""]
+
+  gene_name_conflicts <- gene_dt[
+    !is.na(id) & !is.na(name),
+    .(
+      names = paste(sort(unique(name)), collapse = "|"),
+      n_names = uniqueN(name)
+    ),
+    by = id
+  ][n_names > 1]
+
+  fwrite(
+    gene_name_conflicts,
+    file.path(out_dir, "pre_clinical_gene_name_conflicts.csv")
+  )
+
+  cat("Gene IDs with multiple names:", nrow(gene_name_conflicts), "\n")
+
+  gene_dt <- unique(gene_dt, by = "id")
+
+  fwrite(
+    gene_dt,
+    file.path(out_dir, "pre_clinical_gene.csv")
+  )
+
+  cat("Wrote final genes:", nrow(gene_dt), "\n")
+}
+
+# -------------------------------------------------------------------------
+# GDSCv2 treatment response using summarizeSensitivityProfiles
 
 # -------------------------------------------------------------------------
 # Treatment CID helpers
@@ -917,9 +1318,9 @@ add_treatment_cid <- function(treatment_response_dt, pset, out_path, label = "da
 
 # -------------------------------------------------------------------------
 
-get_available_cell_lines_for_sensitivity <- function(pset_prism) {
+get_available_cell_lines_for_sensitivity <- function(pset_gdscv2) {
   out <- tryCatch(
-    cellNames(pset_prism),
+    cellNames(pset_gdscv2),
     error = function(e) {
       character()
     }
@@ -933,19 +1334,19 @@ get_available_cell_lines_for_sensitivity <- function(pset_prism) {
   }
 
   sample_dt <- as.data.table(
-    pset_prism@sample,
+    pset_gdscv2@sample,
     keep.rownames = "sample_rowname"
   )
 
   candidate_col <- first_existing_col(
     sample_dt,
-    PRISM_CELL_LINE_NAME_CANDIDATES
+    GDSCv2_CELL_LINE_NAME_CANDIDATES
   )
 
   if (is.na(candidate_col)) {
     stop(
-      "Could not determine available PRISM cell lines. ",
-      "cellNames(pset_prism) failed and no usable sample column was found."
+      "Could not determine available GDSCv2 cell lines. ",
+      "cellNames(pset_gdscv2) failed and no usable sample column was found."
     )
   }
 
@@ -992,7 +1393,7 @@ summarized_sensitivity_to_long <- function(
     ),
     file.path(
       out_dir,
-      paste0("prism_treatment_ids_from_", sensitivity_measure, ".csv")
+      paste0("gdscv2_treatment_ids_from_", sensitivity_measure, ".csv")
     )
   )
 
@@ -1002,7 +1403,7 @@ summarized_sensitivity_to_long <- function(
     ),
     file.path(
       out_dir,
-      paste0("prism_cell_lines_from_", sensitivity_measure, ".csv")
+      paste0("gdscv2_cell_lines_from_", sensitivity_measure, ".csv")
     )
   )
 
@@ -1023,20 +1424,12 @@ summarized_sensitivity_to_long <- function(
   ]
 }
 
-extract_treatment_response_prism <- function(pset_prism, canonical_lookup, out_path) {
+extract_treatment_response_gdscv2 <- function(pset_gdscv2, canonical_lookup, out_path) {
   selected_cell_line_lookup <- unique(
     canonical_lookup[
-      source_column %in% c(
-        "canonical_cell_line_name",
-        "final_cell_line_name",
-        "treatment_response_sample_key",
-        "source_sampleid",
-        "sampleid",
-        "prism_cell_line_name"
-      ),
+      source_column %in% c("canonical_cell_line_name", "final_cell_line_name"),
       .(
         sample_id,
-        source_prism_sampleid,
         source_sampleid,
         cell_line_name,
         normalized_cell_line_name = normalize_cell_line_name(cell_line_name)
@@ -1058,16 +1451,16 @@ extract_treatment_response_prism <- function(pset_prism, canonical_lookup, out_p
     )
   }
 
-  available_cell_lines <- get_available_cell_lines_for_sensitivity(pset_prism)
+  available_cell_lines <- get_available_cell_lines_for_sensitivity(pset_gdscv2)
 
   available_lookup <- data.table(
-    prism_cell_line_name_for_summary = available_cell_lines,
+    gdscv2_cell_line_name_for_summary = available_cell_lines,
     normalized_cell_line_name = normalize_cell_line_name(available_cell_lines)
   )
 
   available_lookup <- unique(
     available_lookup[
-      !is.na(prism_cell_line_name_for_summary) &
+      !is.na(gdscv2_cell_line_name_for_summary) &
         !is.na(normalized_cell_line_name)
     ],
     by = "normalized_cell_line_name"
@@ -1082,36 +1475,36 @@ extract_treatment_response_prism <- function(pset_prism, canonical_lookup, out_p
 
   fwrite(
     cell_line_match,
-    sub("\\.csv$", "_selected_cell_lines_available_in_prism.csv", out_path)
+    sub("\\.csv$", "_selected_cell_lines_available_in_gdscv2.csv", out_path)
   )
 
-  missing_cell_lines <- cell_line_match[is.na(prism_cell_line_name_for_summary)]
+  missing_cell_lines <- cell_line_match[is.na(gdscv2_cell_line_name_for_summary)]
 
   fwrite(
     missing_cell_lines,
-    sub("\\.csv$", "_selected_cell_lines_missing_from_prism.csv", out_path)
+    sub("\\.csv$", "_selected_cell_lines_missing_from_gdscv2.csv", out_path)
   )
 
-  cell_lines_to_use <- unique(clean_na(cell_line_match$prism_cell_line_name_for_summary))
+  cell_lines_to_use <- unique(clean_na(cell_line_match$gdscv2_cell_line_name_for_summary))
   cell_lines_to_use <- cell_lines_to_use[!is.na(cell_lines_to_use)]
 
   if (length(cell_lines_to_use) == 0) {
     stop(
-      "None of the selected PRISM cell_line_name values matched sensitivity cell lines. ",
+      "None of the selected GDSCv2 cell_line_name values matched sensitivity cell lines. ",
       "See: ",
-      sub("\\.csv$", "_selected_cell_lines_missing_from_prism.csv", out_path)
+      sub("\\.csv$", "_selected_cell_lines_missing_from_gdscv2.csv", out_path)
     )
   }
 
   aac_long <- summarized_sensitivity_to_long(
-    pset = pset_prism,
+    pset = pset_gdscv2,
     sensitivity_measure = "aac_recomputed",
     cell_lines = cell_lines_to_use,
     out_dir = OUT_DIR
   )
 
   ic50_long <- summarized_sensitivity_to_long(
-    pset = pset_prism,
+    pset = pset_gdscv2,
     sensitivity_measure = "ic50_recomputed",
     cell_lines = cell_lines_to_use,
     out_dir = OUT_DIR
@@ -1131,12 +1524,11 @@ extract_treatment_response_prism <- function(pset_prism, canonical_lookup, out_p
 
   response_cell_line_lookup <- unique(
     cell_line_match[
-      !is.na(prism_cell_line_name_for_summary),
+      !is.na(gdscv2_cell_line_name_for_summary),
       .(
         normalized_cell_line_name,
-        prism_cell_line_name_for_summary,
+        gdscv2_cell_line_name_for_summary,
         sample_id,
-        source_prism_sampleid,
         source_sampleid,
         cell_line_name
       )
@@ -1185,9 +1577,9 @@ extract_treatment_response_prism <- function(pset_prism, canonical_lookup, out_p
 
   treatment_response_dt <- add_treatment_cid(
     treatment_response_dt = treatment_response_dt,
-    pset = pset_prism,
+    pset = pset_gdscv2,
     out_path = out_path,
-    label = "PRISM"
+    label = "GDSCv2"
   )
 
   # summarizeSensitivityProfiles(summary.stat = "mean") should already collapse
@@ -1231,18 +1623,18 @@ extract_treatment_response_prism <- function(pset_prism, canonical_lookup, out_p
 
   fwrite(treatment_response_dt, out_path)
 
-  cat("Wrote PRISM summarized treatment response rows:", nrow(treatment_response_dt), "\n")
+  cat("Wrote GDSCv2 summarized treatment response rows:", nrow(treatment_response_dt), "\n")
 }
 
 # -------------------------------------------------------------------------
-# Load PRISM
+# Load GDSCv2
 # -------------------------------------------------------------------------
 
 cat("\n==============================\n")
-cat("Loading PRISM\n")
+cat("Loading GDSCv2\n")
 cat("==============================\n")
 
-prism <- read_updated_rds(PRISM_RDS_PATH)
+gdscv2 <- read_updated_rds(GDSCV2_RDS_PATH)
 
 # -------------------------------------------------------------------------
 # Select samples/cell lines using external QC sheet new criteria only
@@ -1253,8 +1645,8 @@ sheet_target_data <- read_qc_sheet_soft_tissue_targets(
   out_dir = OUT_DIR
 )
 
-selection_data <- build_prism_selection(
-  pset_prism = prism,
+selection_data <- build_gdscv2_selection(
+  pset_gdscv2 = gdscv2,
   target_cell_lines = TARGET_CELL_LINES,
   sheet_soft_tissue_metadata_dt = sheet_target_data$sheet_soft_tissue_metadata_dt,
   out_dir = OUT_DIR
@@ -1262,14 +1654,14 @@ selection_data <- build_prism_selection(
 
 selected_sample_dt <- selection_data$selected_sample_dt
 
-canonical_lookup <- build_canonical_lookup_prism(selected_sample_dt)
+canonical_lookup <- build_canonical_lookup_gdscv2(selected_sample_dt)
 
 cat("Final new-criteria selected sample rows:", nrow(selected_sample_dt), "\n")
 cat("Canonical lookup rows:", nrow(canonical_lookup), "\n")
 
 fwrite(
   canonical_lookup,
-  file.path(OUT_DIR, "prism_canonical_lookup.csv")
+  file.path(OUT_DIR, "gdscv2_canonical_lookup.csv")
 )
 
 # -------------------------------------------------------------------------
@@ -1339,138 +1731,14 @@ cat("Wrote cell lines:", nrow(cell_line_dt), "\n")
 
 sample_out_dt <- data.table(
   id = clean_na(selected_sample_dt[["canonical_sample_id"]]),
-  cell_line_name = clean_na(selected_sample_dt[["canonical_cell_line_name"]]),
-
-  site_primary = clean_na(safe_col(
-    selected_sample_dt,
-    c(
-      "primary_tissue",
-      "PRISM.tissueid",
-      "tissueid",
-      "ccle_primary_site",
-      "site_primary",
-      "Site.Primary",
-      "primary_site"
-    )
-  )),
-
-  site_subtype1 = clean_na(safe_col(
-    selected_sample_dt,
-    c(
-      "site_subtype1",
-      "Site.Subtype1",
-      "Site_Subtype1"
-    )
-  )),
-
-  site_subtype2 = clean_na(safe_col(
-    selected_sample_dt,
-    c(
-      "site_subtype2",
-      "Site.Subtype2",
-      "Site_Subtype2"
-    )
-  )),
-
-  site_subtype3 = clean_na(safe_col(
-    selected_sample_dt,
-    c(
-      "site_subtype3",
-      "Site.Subtype3",
-      "Site_Subtype3"
-    )
-  )),
-
-  histology = clean_na(safe_col(
-    selected_sample_dt,
-    c(
-      "ccle_primary_hist",
-      "histology",
-      "Histology"
-    )
-  )),
-
-  histology_subtype1 = clean_na(safe_col(
-    selected_sample_dt,
-    c(
-      "ccle_hist_subtype_1",
-      "histology_subtype1",
-      "Hist.Subtype1",
-      "Histology_Subtype1"
-    )
-  )),
-
-  histology_subtype2 = clean_na(safe_col(
-    selected_sample_dt,
-    c(
-      "ccle_hist_subtype_2",
-      "histology_subtype2",
-      "Hist.Subtype2",
-      "Histology_Subtype2"
-    )
-  )),
-
-  histology_subtype3 = clean_na(safe_col(
-    selected_sample_dt,
-    c(
-      "ccle_hist_subtype_3",
-      "histology_subtype3",
-      "Hist.Subtype3",
-      "Histology_Subtype3"
-    )
-  )),
-
-  gender = clean_na(safe_col(
-    selected_sample_dt,
-    c(
-      "gender",
-      "Gender",
-      "sex",
-      "Sex"
-    )
-  )),
-
-  age = parse_age_int(safe_col(
-    selected_sample_dt,
-    c(
-      "age",
-      "Age"
-    )
-  )),
-
-  race = clean_na(safe_col(
-    selected_sample_dt,
-    c(
-      "race",
-      "Race"
-    )
-  )),
-
-  diseases = clean_na(safe_col(
-    selected_sample_dt,
-    c(
-      "Cellosaurus.Disease.Type",
-      "diseases",
-      "cellosaurus.diseases",
-      "Disease",
-      "disease"
-    )
-  )),
-
-  disease_type = clean_na(safe_col(
-    selected_sample_dt,
-    c(
-      "Cellosaurus.Disease.Type",
-      "disease_type",
-      "type",
-      "PRISM.tissueid",
-      "tissueid",
-      "primary_tissue"
-    )
-  ))
+  cell_line_name = clean_na(selected_sample_dt[["canonical_cell_line_name"]])
 )
 
-sample_out_dt <- sample_out_dt[!is.na(id)]
+sample_out_dt <- sample_out_dt[
+  !is.na(id) &
+    !is.na(cell_line_name)
+]
+
 sample_out_dt <- unique(sample_out_dt, by = "id")
 
 fwrite(
@@ -1481,31 +1749,264 @@ fwrite(
 cat("Wrote samples:", nrow(sample_out_dt), "\n")
 
 # -------------------------------------------------------------------------
-# pre_clinical_treatment_response.csv using summarizeSensitivityProfiles
+# Treatment response using summarizeSensitivityProfiles
 # -------------------------------------------------------------------------
 
-extract_treatment_response_prism(
-  pset_prism = prism,
+extract_treatment_response_gdscv2(
+  pset_gdscv2 = gdscv2,
   canonical_lookup = canonical_lookup,
   out_path = file.path(OUT_DIR, "pre_clinical_treatment_response.csv")
 )
 
 # -------------------------------------------------------------------------
+# GDSCv2 molecular profiles
+# -------------------------------------------------------------------------
+
+rnaseq_se <- require_profile(gdscv2, RNA_SEQ_PROFILE_NAME)
+microarray_se <- require_profile(gdscv2, MICROARRAY_PROFILE_NAME)
+cnv_se <- require_profile(gdscv2, CNV_PROFILE_NAME)
+mutation_se <- require_profile(gdscv2, MUTATION_PROFILE_NAME)
+
+# -------------------------------------------------------------------------
+# Gene mappings
+# -------------------------------------------------------------------------
+
+rnaseq_gene_map <- make_gene_mapping(
+  rnaseq_se,
+  ensembl_candidates = c(
+    "gene_id",
+    "EnsemblGeneID",
+    "EnsemblGeneId",
+    "ensembl_gene_id",
+    "feature_id"
+  ),
+  name_candidates = c(
+    "gene_name",
+    "gene_symbol",
+    "Symbol",
+    "symbol",
+    "GeneSymbol"
+  )
+)
+
+microarray_gene_map <- make_gene_mapping(
+  microarray_se,
+  ensembl_candidates = c(
+    "EnsemblGeneId",
+    "EnsemblGeneID",
+    "gene_id",
+    "ensembl_gene_id",
+    "feature_id"
+  ),
+  name_candidates = c(
+    "Symbol",
+    "gene_symbol",
+    "symbol",
+    "gene_name",
+    "GeneSymbol"
+  )
+)
+
+cnv_gene_map <- make_gene_mapping(
+  cnv_se,
+  ensembl_candidates = c(
+    "gene_id",
+    "EnsemblGeneID",
+    "EnsemblGeneId",
+    "ensembl_gene_id",
+    "feature_id"
+  ),
+  name_candidates = c(
+    "gene_name",
+    "gene_symbol",
+    "Symbol",
+    "symbol",
+    "GeneSymbol"
+  )
+)
+
+mutation_gene_map <- make_gene_mapping(
+  mutation_se,
+  ensembl_candidates = c(
+    "EnsemblGeneID",
+    "EnsemblGeneId",
+    "gene_id",
+    "ensembl_gene_id",
+    "feature_id"
+  ),
+  name_candidates = c(
+    "gene_symbol",
+    "Symbol",
+    "symbol",
+    "gene_name",
+    "GeneSymbol"
+  )
+)
+
+write_gene_part(
+  gene_maps = list(
+    rnaseq_gene_map,
+    microarray_gene_map,
+    cnv_gene_map,
+    mutation_gene_map
+  ),
+  out_path = file.path(OUT_DIR, "pre_clinical_gene_gdscv2_part.csv")
+)
+
+finalize_gene_table(
+  gene_part_paths = c(
+    file.path(OUT_DIR, "pre_clinical_gene_gdscv2_part.csv")
+  ),
+  out_dir = OUT_DIR
+)
+
+# -------------------------------------------------------------------------
+# Molecular column maps
+# -------------------------------------------------------------------------
+
+rnaseq_column_map <- build_profile_column_map(
+  se = rnaseq_se,
+  canonical_lookup = canonical_lookup,
+  profile_label = "rnaseq"
+)
+
+microarray_column_map <- build_profile_column_map(
+  se = microarray_se,
+  canonical_lookup = canonical_lookup,
+  profile_label = "microarray"
+)
+
+cnv_column_map <- build_profile_column_map(
+  se = cnv_se,
+  canonical_lookup = canonical_lookup,
+  profile_label = "cnv"
+)
+
+mutation_column_map <- build_profile_column_map(
+  se = mutation_se,
+  canonical_lookup = canonical_lookup,
+  profile_label = "mutation"
+)
+
+cat("Matched GDSCv2 RNA-seq columns:", nrow(rnaseq_column_map), "\n")
+cat("Matched GDSCv2 microarray columns:", nrow(microarray_column_map), "\n")
+cat("Matched GDSCv2 CNV columns:", nrow(cnv_column_map), "\n")
+cat("Matched GDSCv2 mutation columns:", nrow(mutation_column_map), "\n")
+
+fwrite(
+  rnaseq_column_map,
+  file.path(OUT_DIR, "gdscv2_rnaseq_column_map.csv")
+)
+
+fwrite(
+  microarray_column_map,
+  file.path(OUT_DIR, "gdscv2_microarray_column_map.csv")
+)
+
+fwrite(
+  cnv_column_map,
+  file.path(OUT_DIR, "gdscv2_cnv_column_map.csv")
+)
+
+fwrite(
+  mutation_column_map,
+  file.path(OUT_DIR, "gdscv2_mutation_column_map.csv")
+)
+
+# -------------------------------------------------------------------------
+# pre_clinical_rna_seq.csv
+# -------------------------------------------------------------------------
+
+write_long_assay_with_column_map(
+  se = rnaseq_se,
+  gene_map = rnaseq_gene_map,
+  column_map = rnaseq_column_map,
+  out_path = file.path(OUT_DIR, "pre_clinical_rna_seq.csv"),
+  value_col = "value",
+  assay_name = "exprs",
+  value_as_character = FALSE,
+  column_chunk_size = 2
+)
+
+cat("Wrote GDSCv2 RNA-seq assay CSV\n")
+
+# -------------------------------------------------------------------------
+# pre_clinical_microarray.csv
+# -------------------------------------------------------------------------
+
+write_long_assay_with_column_map(
+  se = microarray_se,
+  gene_map = microarray_gene_map,
+  column_map = microarray_column_map,
+  out_path = file.path(OUT_DIR, "pre_clinical_microarray.csv"),
+  value_col = "value",
+  assay_name = "exprs",
+  value_as_character = FALSE,
+  column_chunk_size = 5
+)
+
+cat("Wrote GDSCv2 microarray assay CSV\n")
+
+# -------------------------------------------------------------------------
+# pre_clinical_copy_number_variation.csv
+# -------------------------------------------------------------------------
+
+write_long_assay_with_column_map(
+  se = cnv_se,
+  gene_map = cnv_gene_map,
+  column_map = cnv_column_map,
+  out_path = file.path(OUT_DIR, "pre_clinical_copy_number_variation.csv"),
+  value_col = "value",
+  assay_name = "exprs",
+  value_as_character = FALSE,
+  column_chunk_size = 5
+)
+
+cat("Wrote GDSCv2 CNV assay CSV\n")
+
+# -------------------------------------------------------------------------
+# pre_clinical_mutation.csv
+# -------------------------------------------------------------------------
+
+write_long_assay_with_column_map(
+  se = mutation_se,
+  gene_map = mutation_gene_map,
+  column_map = mutation_column_map,
+  out_path = file.path(OUT_DIR, "pre_clinical_mutation.csv"),
+  value_col = "value",
+  assay_name = "exprs",
+  value_as_character = TRUE,
+  column_chunk_size = 10
+)
+
+cat("Wrote GDSCv2 mutation assay CSV\n")
+
+# -------------------------------------------------------------------------
 # Cleanup
 # -------------------------------------------------------------------------
 
-cat("\nFreeing PRISM objects from memory\n")
+cat("\nFreeing GDSCv2 objects from memory\n")
 
 rm(
-  prism,
+  gdscv2,
   selected_sample_dt,
   sheet_target_data,
   selection_data,
   canonical_lookup,
-  cell_line_dt,
-  sample_out_dt
+  rnaseq_se,
+  microarray_se,
+  cnv_se,
+  mutation_se,
+  rnaseq_gene_map,
+  microarray_gene_map,
+  cnv_gene_map,
+  mutation_gene_map,
+  rnaseq_column_map,
+  microarray_column_map,
+  cnv_column_map,
+  mutation_column_map
 )
 
 gc(verbose = TRUE)
 
-cat("Finished extracting selected PRISM preclinical CSVs into:", OUT_DIR, "\n")
+cat("Finished extracting selected GDSCv2 preclinical CSVs into:", OUT_DIR, "\n")

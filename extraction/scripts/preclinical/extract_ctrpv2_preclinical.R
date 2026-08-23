@@ -760,6 +760,150 @@ build_canonical_lookup_ctrpv2 <- function(selected_sample_dt) {
 
 # -------------------------------------------------------------------------
 # CTRPv2 treatment response using summarizeSensitivityProfiles
+
+# -------------------------------------------------------------------------
+# Treatment CID helpers
+# -------------------------------------------------------------------------
+
+build_treatment_cid_lookup <- function(pset, out_dir = OUT_DIR, label = "dataset") {
+  empty_lookup <- data.table(
+    treatment_id = character(),
+    cid = character(),
+    treatment_id_source_column = character()
+  )
+
+  treatment_obj <- tryCatch(
+    pset@treatment,
+    error = function(e) NULL
+  )
+
+  if (is.null(treatment_obj)) {
+    warning("No treatment slot found for ", label, "; cid will be NA.")
+    return(empty_lookup)
+  }
+
+  treatment_dt <- as.data.table(
+    treatment_obj,
+    keep.rownames = "treatment_rowname"
+  )
+
+  fwrite(
+    data.table(column_name = colnames(treatment_dt)),
+    file.path(out_dir, paste0(tolower(label), "_treatment_slot_columns.csv"))
+  )
+
+  if (nrow(treatment_dt) == 0) {
+    warning("Treatment slot is empty for ", label, "; cid will be NA.")
+    return(empty_lookup)
+  }
+
+  cid_col <- first_existing_col(
+    treatment_dt,
+    c(
+      "cid",
+      "CID",
+      "PubChem.CID",
+      "PubChem_CID",
+      "pubchem_cid",
+      "pubchem.cid",
+      "compound_cid",
+      "compound.cid"
+    )
+  )
+
+  if (is.na(cid_col)) {
+    warning(
+      "No cid column found in the treatment slot for ", label,
+      ". Wrote treatment slot columns for inspection; cid will be NA."
+    )
+    return(empty_lookup)
+  }
+
+  treatment_id_candidate_cols <- c(
+    "treatment_rowname",
+    "treatment_id",
+    "treatmentid",
+    "treatment.id",
+    "TreatmentID",
+    "Treatment.ID",
+    "drug_id",
+    "drugid",
+    "drug.id",
+    "compound_id",
+    "compoundid",
+    "compound.id",
+    "master_cpd_id",
+    "cpd_name",
+    "drug_name",
+    "treatment_name",
+    "name"
+  )
+
+  pieces <- list()
+
+  for (col in treatment_id_candidate_cols) {
+    if (has_col(treatment_dt, col)) {
+      pieces[[col]] <- data.table(
+        treatment_id = clean_na(treatment_dt[[col]]),
+        cid = clean_na(treatment_dt[[cid_col]]),
+        treatment_id_source_column = col
+      )
+    }
+  }
+
+  if (length(pieces) == 0) {
+    warning("No treatment ID candidate columns found for ", label, "; cid will be NA.")
+    return(empty_lookup)
+  }
+
+  lookup <- rbindlist(pieces, fill = TRUE)
+  lookup <- lookup[!is.na(treatment_id) & treatment_id != ""]
+  lookup <- unique(lookup, by = "treatment_id")
+
+  fwrite(
+    lookup,
+    file.path(out_dir, paste0(tolower(label), "_treatment_cid_lookup.csv"))
+  )
+
+  lookup
+}
+
+add_treatment_cid <- function(treatment_response_dt, pset, out_path, label = "dataset") {
+  cid_lookup <- build_treatment_cid_lookup(pset, out_dir = OUT_DIR, label = label)
+
+  treatment_response_dt <- copy(treatment_response_dt)
+  treatment_response_dt[, treatment_id := clean_na(treatment_id)]
+
+  if (nrow(cid_lookup) == 0) {
+    treatment_response_dt[, cid := NA_character_]
+    return(treatment_response_dt)
+  }
+
+  treatment_response_dt <- merge(
+    treatment_response_dt,
+    cid_lookup[, .(treatment_id, cid)],
+    by = "treatment_id",
+    all.x = TRUE
+  )
+
+  setcolorder(
+    treatment_response_dt,
+    c(
+      "cell_line_name",
+      "treatment_id",
+      "cid",
+      setdiff(colnames(treatment_response_dt), c("cell_line_name", "treatment_id", "cid"))
+    )
+  )
+
+  fwrite(
+    treatment_response_dt,
+    sub("\\.csv$", "_with_cid_mapped_raw_rows.csv", out_path)
+  )
+
+  treatment_response_dt
+}
+
 # -------------------------------------------------------------------------
 
 get_available_cell_lines_for_sensitivity <- function(pset_ctrpv2) {
@@ -1026,6 +1170,13 @@ extract_treatment_response_ctrpv2 <- function(pset_ctrpv2, canonical_lookup, out
       !is.na(treatment_id)
   ]
 
+  treatment_response_dt <- add_treatment_cid(
+    treatment_response_dt = treatment_response_dt,
+    pset = pset_ctrpv2,
+    out_path = out_path,
+    label = "CTRPv2"
+  )
+
   # summarizeSensitivityProfiles(summary.stat = "mean") should already collapse
   # raw replicate experiments. This check only catches accidental duplicate
   # mappings caused by duplicated selected cell-line names.
@@ -1058,6 +1209,7 @@ extract_treatment_response_ctrpv2 <- function(pset_ctrpv2, canonical_lookup, out
     c(
       "cell_line_name",
       "treatment_id",
+      "cid",
       "ic50_recomputed",
       "acc_recomputed",
       "mechanism_of_action"
@@ -1173,12 +1325,12 @@ cat("Wrote cell lines:", nrow(cell_line_dt), "\n")
 # -------------------------------------------------------------------------
 
 sample_out_dt <- data.table(
-  sampleid = clean_na(selected_sample_dt[["canonical_sample_id"]]),
+  id = clean_na(selected_sample_dt[["canonical_sample_id"]]),
   cell_line_name = clean_na(selected_sample_dt[["canonical_cell_line_name"]])
 )
 
-sample_out_dt <- sample_out_dt[!is.na(sampleid) & !is.na(cell_line_name)]
-sample_out_dt <- unique(sample_out_dt, by = "sampleid")
+sample_out_dt <- sample_out_dt[!is.na(id) & !is.na(cell_line_name)]
+sample_out_dt <- unique(sample_out_dt, by = "id")
 
 fwrite(
   sample_out_dt,

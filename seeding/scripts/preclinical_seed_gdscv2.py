@@ -24,15 +24,16 @@ from ..models.tables import (
 )
 
 
-DEFAULT_DATA_DIR = Path("extraction/data/proc/preclinical/PRISM")
-DEFAULT_DATASET_NAME = "PRISM"
-SAMPLE_ID_PREFIX = "PRISM_"
+DEFAULT_DATA_DIR = Path("extraction/data/proc/preclinical/GDSCv2")
+DEFAULT_DATASET_NAME = "GDSCv2"
+SAMPLE_ID_PREFIX = "gdsc_"
 DEFAULT_DATASET_METADATA_CSV = Path("extraction/data/raw/preclinical/combined_datasets.csv")
 DEFAULT_CHUNK_SIZE = 100_000
-LOAD_RNA_SEQ = False
-LOAD_MICROARRAY = False
-LOAD_CNV = False
-RNA_TRANSFORM = "none"
+LOAD_RNA_SEQ = True
+LOAD_MICROARRAY = True
+LOAD_CNV = True
+RNA_TRANSFORM = "log2_tpm_plus_pseudocount_to_log2_tpm_plus_one"
+# RNA-seq is standardized to log2(TPM + 1) during seeding.
 CNV_TRANSFORM = "none"
 
 
@@ -61,6 +62,19 @@ REQUIRED_GENE_COLUMNS = {"id", "name"}
 REQUIRED_MOLECULAR_COLUMNS = {"sample_id", "gene_id", "value"}
 
 
+def tpm_to_log2_tpm_plus_one(value: float | None) -> float | None:
+    """Convert TPM values to the standardized log2(TPM + 1) scale."""
+    if value is None:
+        return None
+    if value < 0:
+        return None
+
+    out = math.log2(value + 1.0)
+    if not math.isfinite(out):
+        return None
+    return out
+
+
 def log2_tpm_plus_pseudocount_to_tpm(value: float | None) -> float | None:
     """Convert log2(TPM + 0.001) values back to TPM."""
     if value is None:
@@ -70,6 +84,14 @@ def log2_tpm_plus_pseudocount_to_tpm(value: float | None) -> float | None:
     if not math.isfinite(out):
         return None
     return out
+
+
+def log2_tpm_plus_pseudocount_to_log2_tpm_plus_one(
+    value: float | None,
+) -> float | None:
+    """Convert log2(TPM + 0.001) source values to standardized log2(TPM + 1)."""
+    tpm = log2_tpm_plus_pseudocount_to_tpm(value)
+    return tpm_to_log2_tpm_plus_one(tpm)
 
 
 def linear_cnv_to_log2(value: float | None) -> float | None:
@@ -86,8 +108,12 @@ def linear_cnv_to_log2(value: float | None) -> float | None:
 
 
 def get_value_transform(transform_name: str) -> Callable[[float | None], float | None] | None:
+    if transform_name == "tpm_to_log2_tpm_plus_one":
+        return tpm_to_log2_tpm_plus_one
     if transform_name == "log2_tpm_plus_pseudocount_to_tpm":
         return log2_tpm_plus_pseudocount_to_tpm
+    if transform_name == "log2_tpm_plus_pseudocount_to_log2_tpm_plus_one":
+        return log2_tpm_plus_pseudocount_to_log2_tpm_plus_one
     if transform_name == "linear_cnv_to_log2":
         return linear_cnv_to_log2
     if transform_name in {"", "none", "None", "null"}:
@@ -208,13 +234,13 @@ def clean_bool(value: Any) -> bool | None:
 
 def read_csv(path: Path) -> pd.DataFrame:
     if not path.exists():
-        raise FileNotFoundError(f"Missing required PRISM CSV: {path}")
+        raise FileNotFoundError(f"Missing required GDSCv2 CSV: {path}")
     return pd.read_csv(path, dtype=str, keep_default_na=False, na_values=[])
 
 
 def iter_csv_chunks(path: Path, *, chunksize: int) -> Iterable[pd.DataFrame]:
     if not path.exists():
-        raise FileNotFoundError(f"Missing required PRISM CSV: {path}")
+        raise FileNotFoundError(f"Missing required GDSCv2 CSV: {path}")
 
     yield from pd.read_csv(
         path,
@@ -266,7 +292,7 @@ def ensure_prefixed_sample_ids(sample_ids: list[Any], *, auto_prefix: bool) -> l
     if unprefixed:
         preview = ", ".join(unprefixed[:10])
         raise ValueError(
-            f"PRISM sample IDs must already be prefixed before database insert. "
+            f"GDSCv2 sample IDs must already be prefixed before database insert. "
             f"Found unprefixed sample IDs, for example: {preview}. "
             "Fix the extractor output or rerun with --auto-prefix-samples."
         )
@@ -485,7 +511,7 @@ def seed_cell_lines(session: Session, *, dataset_id: int, data_dir: Path) -> dic
             )
         ).all()
     )
-    print(f"Seeded PRISM cell lines: {len(lookup)}")
+    print(f"Seeded GDSCv2 cell lines: {len(lookup)}")
     return lookup
 
 
@@ -515,7 +541,7 @@ def seed_samples(
     if missing_cell_lines:
         preview = ", ".join(missing_cell_lines[:20])
         raise ValueError(
-            f"Some PRISM sample rows reference cell lines that were not loaded into "
+            f"Some GDSCv2 sample rows reference cell lines that were not loaded into "
             f"pre_clinical_cell_line for dataset_id={dataset_id}. Examples: {preview}"
         )
 
@@ -532,7 +558,7 @@ def seed_samples(
     session.flush()
 
     sample_ids = set(sample_df["__id"])
-    print(f"Seeded PRISM samples: {len(rows)}")
+    print(f"Seeded GDSCv2 samples: {len(rows)}")
     return sample_ids
 
 
@@ -559,7 +585,7 @@ def seed_treatment_response(
     if missing_cell_lines:
         preview = ", ".join(missing_cell_lines[:20])
         raise ValueError(
-            f"Some PRISM treatment-response rows reference cell lines that were not "
+            f"Some GDSCv2 treatment-response rows reference cell lines that were not "
             f"loaded into pre_clinical_cell_line for dataset_id={dataset_id}. "
             f"Examples: {preview}"
         )
@@ -583,7 +609,7 @@ def seed_treatment_response(
         session.bulk_insert_mappings(PreClinicalTreatmentResponse, rows)
         session.flush()
 
-    print(f"Seeded PRISM treatment responses: {len(rows)}")
+    print(f"Seeded GDSCv2 treatment responses: {len(rows)}")
 
 
 def seed_genes(session: Session, *, data_dir: Path) -> set[str]:
@@ -611,7 +637,7 @@ def seed_genes(session: Session, *, data_dir: Path) -> set[str]:
 
     gene_ids = set(gene_df["id"])
     print(
-        f"Inserted new PRISM genes where absent; existing gene IDs were skipped. "
+        f"Inserted new GDSCv2 genes where absent; existing gene IDs were skipped. "
         f"Candidate gene IDs: {len(gene_ids)}"
     )
     return gene_ids
@@ -630,7 +656,7 @@ def validate_molecular_samples_prefixed(sample_ids: set[str], *, label: str) -> 
     if unprefixed:
         preview = ", ".join(unprefixed[:10])
         raise ValueError(
-            f"PRISM {label} contains unprefixed sample_id values. Examples: {preview}. "
+            f"GDSCv2 {label} contains unprefixed sample_id values. Examples: {preview}. "
             "Fix the extractor output before loading."
         )
 
@@ -672,7 +698,7 @@ def seed_molecular_file(
         if missing_sample_ids:
             preview = ", ".join(missing_sample_ids[:20])
             raise ValueError(
-                f"PRISM {label} has sample_id values missing from pre_clinical_sample. "
+                f"GDSCv2 {label} has sample_id values missing from pre_clinical_sample. "
                 f"Examples: {preview}"
             )
 
@@ -681,7 +707,7 @@ def seed_molecular_file(
         if missing_gene_ids:
             preview = ", ".join(missing_gene_ids[:20])
             raise ValueError(
-                f"PRISM {label} has gene_id values missing from pre_clinical_gene. "
+                f"GDSCv2 {label} has gene_id values missing from pre_clinical_gene. "
                 f"Examples: {preview}"
             )
 
@@ -706,10 +732,10 @@ def seed_molecular_file(
             session.flush()
 
         total_insert_candidates += len(rows)
-        print(f"Seeded PRISM {label} chunk {chunk_index}: {len(rows)} candidate rows")
+        print(f"Seeded GDSCv2 {label} chunk {chunk_index}: {len(rows)} candidate rows")
 
     print(
-        f"Finished PRISM {label}: {total_insert_candidates} candidate rows. "
+        f"Finished GDSCv2 {label}: {total_insert_candidates} candidate rows. "
         f"Skipped non-finite/missing values: {total_skipped_missing_value}"
     )
 
@@ -729,7 +755,7 @@ def seed_dataset(
 
     with Session(engine) as session:
         if replace:
-            print(f"Replacing existing dataset rows for {PRISM}")
+            print(f"Replacing existing dataset rows for {GDSCv2}")
             delete_existing_dataset(session, dataset_name)
             session.commit()
 
@@ -780,18 +806,18 @@ def seed_dataset(
                 )
                 session.commit()
 
-    print(f"Finished PRISM preclinical seeding. Mutation upload was skipped.")
+    print(f"Finished GDSCv2 preclinical seeding. Mutation upload was skipped.")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description=f"Seed the PRISM preclinical dataset from extracted CSVs. Mutation upload is intentionally skipped."
+        description=f"Seed the GDSCv2 preclinical dataset from extracted CSVs. Mutation upload is intentionally skipped."
     )
     parser.add_argument(
         "--data-dir",
         type=Path,
         default=DEFAULT_DATA_DIR,
-        help=f"Directory containing PRISM extracted CSVs. Default: {DEFAULT_DATA_DIR}",
+        help=f"Directory containing GDSCv2 extracted CSVs. Default: {DEFAULT_DATA_DIR}",
     )
     parser.add_argument(
         "--dataset-name",
@@ -811,7 +837,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--replace",
         action="store_true",
-        help=f"Delete existing PRISM dataset rows before reloading.",
+        help=f"Delete existing GDSCv2 dataset rows before reloading.",
     )
     parser.add_argument(
         "--auto-prefix-samples",
