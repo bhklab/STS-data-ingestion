@@ -102,6 +102,14 @@ class ClinicalRNA(Base):
         nullable=True,
     ) # tpm_unstrand matrix
 
+    __table_args__ = (
+        UniqueConstraint(
+            "sample_id",
+            "gene_id",
+            name="uq_clinical_rna_sample_gene",
+        ),
+    )
+
 
 class ClinicalMutation(Base):
     __tablename__ = "clinical_mutation"
@@ -124,8 +132,14 @@ class ClinicalMutation(Base):
         String(100),
         nullable=True,
     ) # oncoprint matrix
-        
-    
+
+    __table_args__ = (
+        UniqueConstraint(
+            "sample_id",
+            "gene_id",
+            name="uq_clinical_mutation_sample_gene",
+        ),
+    )
 
 
 class ClinicalCNV(Base):
@@ -146,6 +160,14 @@ class ClinicalCNV(Base):
         nullable=True,
     ) # copy_number
 
+    __table_args__ = (
+        UniqueConstraint(
+            "sample_id",
+            "gene_id",
+            name="uq_clinical_cnv_sample_gene",
+        ),
+    )
+
 
 class ClinicalRPPA(Base):
     __tablename__ = "clinical_rppa"
@@ -164,6 +186,14 @@ class ClinicalRPPA(Base):
         Float,
         nullable=True,
     ) # expression matrix
+
+    __table_args__ = (
+        UniqueConstraint(
+            "sample_id",
+            "antigen_id",
+            name="uq_clinical_rppa_sample_antigen",
+        ),
+    )
 
 
 class ClinicalMiRNA(Base):
@@ -188,6 +218,14 @@ class ClinicalMiRNA(Base):
         nullable=True,
     ) #rpm matrix
 
+    __table_args__ = (
+        UniqueConstraint(
+            "sample_id",
+            "id",
+            name="uq_clinical_mirna_sample_id",
+        ),
+    )
+
 
 class ClinicalMethylation(Base):
     __tablename__ = "clinical_methylation"
@@ -207,19 +245,21 @@ class ClinicalMethylation(Base):
         nullable=True,
     ) #listData [[1]] matrix
 
+    __table_args__ = (
+        UniqueConstraint(
+            "sample_id",
+            "probe_id",
+            name="uq_clinical_methylation_sample_probe",
+        ),
+    )
+
 
 class ClinicalSlide(Base):
     __tablename__ = "clinical_slide"
 
-    # Full slide barcode + UUID, e.g.
-    # TCGA-3B-A9HI-01Z-00-DX1.FF553011-934A-4E3E-AA53-B87FC307E095. One
-    # sample can have multiple slides (some samples have up to 9), so this
-    # is the primary key rather than sample_id.
+    # Full slide barcode + UUID, e.g. TCGA-3B-A9HI-01Z-00-DX1.FF553011-934A-4E3E-AA53-B87FC307E095.
+	# Note: One sample can have multiple slides (some samples have up to 9).
     id: Mapped[str] = mapped_column(String(150), primary_key=True)
-    # Resolved at extraction time (extract_tcga_slides.py) against clinical_
-    # sample.id: slide barcodes use vial letter "Z" while clinical_sample.id
-    # uses "A"/"B"/etc, so this can't be derived by truncating the slide
-    # barcode -- it's matched by patient + sample type prefix instead.
     sample_id: Mapped[str] = mapped_column(
         String(100),
         ForeignKey("clinical_sample.id", ondelete="CASCADE")
