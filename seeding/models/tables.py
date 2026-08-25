@@ -1,11 +1,13 @@
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -44,16 +46,16 @@ class ClinicalSample(Base):
     age: Mapped[int | None] = mapped_column(Integer, nullable=True) # age_curated
     histology: Mapped[str | None] = mapped_column(String(50), nullable=True) # histo
     tissue: Mapped[str | None] = mapped_column(String(50), nullable=True) # cancer_type
-    tissue_origin: Mapped[str | None] = mapped_column(String(50), nullable=True) # tissue_or_organ_of_origin
+    tissue_origin: Mapped[str | None] = mapped_column(String(100), nullable=True) # tissue_or_organ_of_origin
     
 
 class ClinicalAntigen(Base):
     __tablename__ = "clinical_antigen"
 
     id: Mapped[str] = mapped_column(
-        String(255),
+        String(100),
         primary_key=True,
-    )
+    ) # Ex. AGID00100
     catalogue_number: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,
@@ -73,9 +75,9 @@ class ClinicalProbe(Base):
     __tablename__ = "clinical_probe"
 
     id: Mapped[str] = mapped_column(
-        String(255),
+        String(100),
         primary_key=True,
-    )
+    ) # Ex. cg13869341
     name: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,
@@ -91,7 +93,7 @@ class ClinicalRNA(Base):
         primary_key=True,
     )
     sample_id: Mapped[str] = mapped_column(
-        String(255),
+        String(100),
         ForeignKey("clinical_sample.id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -110,7 +112,7 @@ class ClinicalMutation(Base):
         primary_key=True,
     )
     sample_id: Mapped[str] = mapped_column(
-        String(255),
+        String(100),
         ForeignKey("clinical_sample.id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -119,7 +121,7 @@ class ClinicalMutation(Base):
         nullable=True,
     ) # mutation matrix
     oncoprint: Mapped[str | None] = mapped_column(
-        String(255),
+        String(100),
         nullable=True,
     ) # oncoprint matrix
         
@@ -135,7 +137,7 @@ class ClinicalCNV(Base):
         primary_key=True,
     )
     sample_id: Mapped[str] = mapped_column(
-        String(255),
+        String(100),
         ForeignKey("clinical_sample.id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -149,12 +151,12 @@ class ClinicalRPPA(Base):
     __tablename__ = "clinical_rppa"
 
     antigen_id: Mapped[str] = mapped_column(
-        String(255),
+        String(100),
         ForeignKey("clinical_antigen.id"),
         primary_key=True,
     )
     sample_id: Mapped[str] = mapped_column(
-        String(255),
+        String(100),
         ForeignKey("clinical_sample.id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -170,9 +172,9 @@ class ClinicalMiRNA(Base):
     id: Mapped[str] = mapped_column(
         String(255),
         primary_key=True,
-    )
+    ) # Ex. hsa-let-7a-1
     sample_id: Mapped[str] = mapped_column(
-        String(255),
+        String(100),
         ForeignKey("clinical_sample.id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -191,12 +193,12 @@ class ClinicalMethylation(Base):
     __tablename__ = "clinical_methylation"
 
     probe_id: Mapped[str] = mapped_column(
-        String(255),
+        String(100),
         ForeignKey("clinical_probe.id"),
         primary_key=True,
     )
     sample_id: Mapped[str] = mapped_column(
-        String(255),
+        String(100),
         ForeignKey("clinical_sample.id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -204,6 +206,81 @@ class ClinicalMethylation(Base):
         Float,
         nullable=True,
     ) #listData [[1]] matrix
+
+
+class ClinicalSlide(Base):
+    __tablename__ = "clinical_slide"
+
+    # Full slide barcode + UUID, e.g.
+    # TCGA-3B-A9HI-01Z-00-DX1.FF553011-934A-4E3E-AA53-B87FC307E095. One
+    # sample can have multiple slides (some samples have up to 9), so this
+    # is the primary key rather than sample_id.
+    id: Mapped[str] = mapped_column(String(150), primary_key=True)
+    # Resolved at extraction time (extract_tcga_slides.py) against clinical_
+    # sample.id: slide barcodes use vial letter "Z" while clinical_sample.id
+    # uses "A"/"B"/etc, so this can't be derived by truncating the slide
+    # barcode -- it's matched by patient + sample type prefix instead.
+    sample_id: Mapped[str] = mapped_column(
+        String(100),
+        ForeignKey("clinical_sample.id", ondelete="CASCADE")
+    )
+    dataset_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("datasets.id"),
+    )
+    n_tiles: Mapped[int] = mapped_column(Integer)
+    embedding_dim: Mapped[int] = mapped_column(Integer)  # e.g. 1536
+
+
+class ClinicalTile(Base):
+    __tablename__ = "clinical_tile"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    slide_id: Mapped[str] = mapped_column(
+        String(150),
+        ForeignKey("clinical_slide.id", ondelete="CASCADE"),
+        index=True,
+    )
+    tile_index: Mapped[int] = mapped_column(Integer)
+    x: Mapped[float] = mapped_column(Float)
+    y: Mapped[float] = mapped_column(Float)
+
+    __table_args__ = (
+        UniqueConstraint("slide_id", "tile_index", name="uq_tile_slide_index"),
+    )
+
+
+class ClinicalEmbedding(Base):
+    __tablename__ = "clinical_embedding"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    slide_id: Mapped[str] = mapped_column(
+        String(150),
+        ForeignKey("clinical_slide.id", ondelete="CASCADE"),
+        index=True,
+    )
+    tile_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("clinical_tile.id", ondelete="CASCADE"),
+        nullable=True,
+    )  # NULL for slide-level pooled rows (kind="slide_mean")
+    model_name: Mapped[str] = mapped_column(String(100))
+    kind: Mapped[str] = mapped_column(String(20))  # "tile" | "slide_mean"
+    embedding: Mapped[bytes] = mapped_column(
+        LargeBinary
+    )  # packed float32 vector, e.g. 1536 float32 = 6144 bytes/tile
+
+    __table_args__ = (
+        UniqueConstraint(
+            "slide_id", "model_name", "kind", "tile_id",
+            name="uq_embedding_slide_model_kind_tile",
+        ),
+        CheckConstraint(
+            "(kind = 'tile' AND tile_id IS NOT NULL) "
+            "OR (kind = 'slide_mean' AND tile_id IS NULL)",
+            name="ck_embedding_kind_tile_id",
+        ),
+    )
 
 
 """
