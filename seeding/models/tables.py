@@ -30,18 +30,180 @@ class ClinicalDataset(Base):
     name: Mapped[str] = mapped_column(Text())
 
 
-class ClinicalPatient(Base):
-    __tablename__ = "clinical_patient"
+class ClinicalSample(Base):
+    __tablename__ = "clinical_sample"
 
     id: Mapped[str] = mapped_column(String(100), primary_key=True)
     dataset_id: Mapped[int] = mapped_column(
         Integer,
-        ForeignKey("clinical_dataset.id"),
+        ForeignKey("datasets.id"),
     )
-    race: Mapped[str | None] = mapped_column(String(30), nullable=True)
-    ethnicity: Mapped[str | None] = mapped_column(String(30), nullable=True)
-    gender: Mapped[str | None] = mapped_column(String(1), nullable=True)
-    sex_at_birth: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    race: Mapped[str | None] = mapped_column(String(30), nullable=True) # race_standardized
+    ethnicity: Mapped[str | None] = mapped_column(String(30), nullable=True) # ethnicity_standardized
+    sex: Mapped[str | None] = mapped_column(String(1), nullable=True) # sex_curated
+    age: Mapped[int | None] = mapped_column(Integer, nullable=True) # age_curated
+    histology: Mapped[str | None] = mapped_column(String(50), nullable=True) # histo
+    tissue: Mapped[str | None] = mapped_column(String(50), nullable=True) # cancer_type
+    tissue_origin: Mapped[str | None] = mapped_column(String(50), nullable=True) # tissue_or_organ_of_origin
+    
+
+class ClinicalAntigen(Base):
+    __tablename__ = "clinical_antigen"
+
+    id: Mapped[str] = mapped_column(
+        String(255),
+        primary_key=True,
+    )
+    catalogue_number: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    peptide_target: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    peptide_target_gene: Mapped[str | None] = mapped_column(
+        String(255),
+        ForeignKey("pre_clinical_gene.id"),
+        nullable=True,
+    )
+
+
+class ClinicalProbe(Base):
+    __tablename__ = "clinical_probe"
+
+    id: Mapped[str] = mapped_column(
+        String(255),
+        primary_key=True,
+    )
+    name: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+
+class ClinicalRNA(Base):
+    __tablename__ = "clinical_rna"
+
+    gene_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("pre_clinical_gene.id"),
+        primary_key=True,
+    )
+    sample_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("clinical_sample.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    value: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    ) # tpm_unstrand matrix
+
+
+class ClinicalMutation(Base):
+    __tablename__ = "clinical_mutation"
+
+    gene_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("pre_clinical_gene.id"),
+        primary_key=True,
+    )
+    sample_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("clinical_sample.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    mutation: Mapped[Boolean | None] = mapped_column(
+        Boolean,
+        nullable=True,
+    ) # mutation matrix
+    oncoprint: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    ) # oncoprint matrix
+        
+    
+
+
+class ClinicalCNV(Base):
+    __tablename__ = "clinical_cnv"
+
+    gene_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("pre_clinical_gene.id"),
+        primary_key=True,
+    )
+    sample_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("clinical_sample.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    value: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    ) # copy_number
+
+
+class ClinicalRPPA(Base):
+    __tablename__ = "clinical_rppa"
+
+    antigen_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("clinical_antigen.id"),
+        primary_key=True,
+    )
+    sample_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("clinical_sample.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    value: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    ) # expression matrix
+
+
+class ClinicalMiRNA(Base):
+    __tablename__ = "clinical_mirna"
+
+    id: Mapped[str] = mapped_column(
+        String(255),
+        primary_key=True,
+    )
+    sample_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("clinical_sample.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    gene_id: Mapped[str | None] = mapped_column(
+        String(255),
+        ForeignKey("pre_clinical_gene.id"),
+        nullable=True,
+    )
+    value: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    ) #rpm matrix
+
+
+class ClinicalMethylation(Base):
+    __tablename__ = "clinical_methylation"
+
+    probe_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("clinical_probe.id"),
+        primary_key=True,
+    )
+    sample_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("clinical_sample.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    value: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    ) #listData [[1]] matrix
 
 
 """
@@ -78,7 +240,7 @@ pre_clinical_gene.csv:
 """
 
 
-class PreClinicalDataset(Base):
+class Dataset(Base):
     __tablename__ = "datasets"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -135,7 +297,7 @@ class PreClinicalCellLine(Base):
         Index("ix_pc_cell_line_accession", "accession"),
     )
 
-    dataset: Mapped["PreClinicalDataset"] = relationship(back_populates="cell_lines")
+    dataset: Mapped["Dataset"] = relationship(back_populates="cell_lines")
     samples: Mapped[list["PreClinicalSample"]] = relationship(
         back_populates="cell_line",
         cascade="all, delete-orphan",
@@ -230,7 +392,7 @@ class PreClinicalSample(Base):
         ),
     )
 
-    dataset: Mapped["PreClinicalDataset"] = relationship(
+    dataset: Mapped["Dataset"] = relationship(
         back_populates="samples",
         overlaps="cell_line,samples",
     )
@@ -292,7 +454,7 @@ class PreClinicalTreatmentResponse(Base):
         Index("ix_pc_tr_cid", "cid"),
     )
 
-    dataset: Mapped["PreClinicalDataset"] = relationship(
+    dataset: Mapped["Dataset"] = relationship(
         back_populates="treatment_responses",
         overlaps="cell_line,treatment_responses",
     )
