@@ -5,12 +5,13 @@ This README documents the full end-to-end process for regenerating extracted pre
 The workflow is:
 
 1. Confirm required raw input files are present.
-2. Drop existing preclinical tables.
-3. Run extraction scripts to generate processed CSVs.
-4. Seed each dataset into MySQL.
-5. Seed drug annotations from AnnotationDB.
-6. Seed cell-line annotations from AnnotationDB and OncoTree.
-7. Run basic validation checks.
+2. (Optional) Back up existing database tables to CSV.
+3. Drop existing preclinical tables.
+4. Run extraction scripts to generate processed CSVs.
+5. Seed each dataset into MySQL.
+6. Seed drug annotations from AnnotationDB.
+7. Seed cell-line annotations from AnnotationDB and OncoTree.
+8. Run basic validation checks.
 
 ---
 
@@ -71,7 +72,41 @@ You should see the six `.rds` files and the two `.csv` files listed above.
 
 ---
 
-## 2. Drop existing preclinical tables
+## 2. Back up existing database tables (Optional / Recommended)
+
+Before dropping tables or reseeding the database, you can export a full CSV backup of all tables in `sts_portal_beta` using the backup script:
+
+```bash
+pixi run python extraction/data/backups/backup_tables.py
+```
+
+This will automatically inspect the database, export each table into CSV format using streaming chunks (to safely handle multi-million row tables), save them in a timestamped folder inside `extraction/data/backups/`, and generate a `backup_manifest.json` file detailing row counts, file sizes, and execution durations.
+
+### Additional Backup Options
+
+- **Save CSVs directly without a timestamped subdirectory:**
+  ```bash
+  pixi run python extraction/data/backups/backup_tables.py --no-timestamp
+  ```
+
+- **Save as compressed gzip files (`.csv.gz`):**
+  ```bash
+  pixi run python extraction/data/backups/backup_tables.py --compress
+  ```
+
+- **Back up specific tables only:**
+  ```bash
+  pixi run python extraction/data/backups/backup_tables.py --tables datasets drugs pre_clinical_sample
+  ```
+
+- **Custom batch size (number of rows per chunk):**
+  ```bash
+  pixi run python extraction/data/backups/backup_tables.py --chunksize 100000
+  ```
+
+---
+
+## 3. Drop existing preclinical tables
 
 Before doing a full clean reload, drop the existing preclinical tables from `sts_portal_beta`.
 
@@ -108,7 +143,7 @@ This removes all preclinical data and schema objects so the rerun starts cleanly
 
 ---
 
-## 3. Run extraction scripts
+## 4. Run extraction scripts
 
 Run from the repository root.
 
@@ -162,7 +197,7 @@ Notes:
 
 ---
 
-## 4. Seed extracted datasets into MySQL
+## 5. Seed extracted datasets into MySQL
 
 Run from the repository root after all extraction scripts complete successfully.
 
@@ -197,7 +232,7 @@ Mutation insertion is intentionally skipped.
 
 ---
 
-## 5. RNA-seq standardization
+## 6. RNA-seq standardization
 
 RNA-seq values are standardized during seeding to:
 
@@ -223,7 +258,7 @@ GDSCv2:
 
 ---
 
-## 6. CNV handling
+## 7. CNV handling
 
 CNV values are stored as gene-level log2 copy-number values.
 
@@ -246,7 +281,7 @@ GDSCv2:
 
 ---
 
-## 7. Gene ID cleaning
+## 8. Gene ID cleaning
 
 Gene Ensembl IDs are cleaned by removing any suffix beginning with a period.
 
@@ -260,7 +295,7 @@ The gene table uses global Ensembl IDs. If a gene ID already exists, seeders ski
 
 ---
 
-## 8. Seed the drugs table from treatment-response CIDs
+## 9. Seed the drugs table from treatment-response CIDs
 
 Run after all treatment-response rows have been seeded.
 
@@ -299,7 +334,7 @@ extraction/data/proc/preclinical/drugs/drug_cids_not_found_annotationdb.csv
 
 ---
 
-## 9. Seed cell-line info from Cellosaurus accessions
+## 10. Seed cell-line info from Cellosaurus accessions
 
 Run after all `pre_clinical_cell_line` rows have been seeded.
 
@@ -365,7 +400,7 @@ extraction/data/proc/preclinical/cell_line_info/cell_line_info_oncotree_unresolv
 
 ---
 
-## 10. Full clean run command sequence
+## 11. Full clean run command sequence
 
 After dropping the tables in MySQL, run:
 
@@ -389,7 +424,7 @@ pixi run python -m seeding.scripts.preclinical_seed_cell_line_info_from_annotati
 
 ---
 
-## 11. Quick validation queries
+## 12. Quick validation queries
 
 Run these in MySQL after seeding.
 
@@ -447,7 +482,7 @@ cat extraction/data/proc/preclinical/cell_line_info/cell_line_info_oncotree_unre
 
 ---
 
-## 12. Notes on `--replace`
+## 13. Notes on `--replace`
 
 For a full clean reload, do not use `--replace`; drop the tables and run the seeders normally.
 
@@ -463,7 +498,7 @@ This deletes and reinserts only the CCLE dataset rows. It does not reset every p
 
 ---
 
-## 13. Common troubleshooting
+## 14. Common troubleshooting
 
 ### Missing raw PSet file
 

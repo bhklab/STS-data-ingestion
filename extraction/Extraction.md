@@ -6,7 +6,10 @@ Suite of tools for extracting various data layers from clinical and preclinical 
 
 ### data
 
-Container for all raw data objects and their extracted csvs. `/data/raw` contains raw (MAE's) and semi processed data files. `/data/proc` contains the extracted csvs files that are ready to be piped into the seeding scripts in 
+Container for all raw data objects, extracted CSVs, and database backups:
+- `/data/raw`: Contains raw (MAEs, PSets) and semi-processed data files.
+- `/data/proc`: Contains the extracted CSV files ready to be piped into seeding scripts.
+- `/data/backups`: Contains timestamped CSV database dumps and `backup_tables.py` utility.
 
 ### scripts
 
