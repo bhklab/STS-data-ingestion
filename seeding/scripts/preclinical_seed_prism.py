@@ -15,7 +15,7 @@ from ..models.tables import (
     Base,
     PreClinicalCellLine,
     PreClinicalCopyNumberVariation,
-    PreClinicalDataset,
+    Dataset,
     PreClinicalGene,
     PreClinicalMicroarray,
     PreClinicalRnaSeq,
@@ -275,8 +275,8 @@ def ensure_prefixed_sample_ids(sample_ids: list[Any], *, auto_prefix: bool) -> l
 
 
 def validate_final_tables_model() -> None:
-    if PreClinicalDataset.__tablename__ != "datasets":
-        raise RuntimeError("tables.py must map PreClinicalDataset to the datasets table.")
+    if Dataset.__tablename__ != "datasets":
+        raise RuntimeError("tables.py must map Dataset to the datasets table.")
     for attr in (
         "name",
         "version",
@@ -288,8 +288,8 @@ def validate_final_tables_model() -> None:
         "key_study_findings",
         "clinical",
     ):
-        if not hasattr(PreClinicalDataset, attr):
-            raise RuntimeError(f"tables.py must define PreClinicalDataset.{attr}.")
+        if not hasattr(Dataset, attr):
+            raise RuntimeError(f"tables.py must define Dataset.{attr}.")
     if not hasattr(PreClinicalSample, "id"):
         raise RuntimeError("tables.py must define PreClinicalSample.id as the primary key.")
     if not hasattr(PreClinicalSample, "dataset_id"):
@@ -305,7 +305,7 @@ def validate_final_tables_model() -> None:
 
 def create_required_tables(engine) -> None:
     tables = [
-        PreClinicalDataset.__table__,
+        Dataset.__table__,
         PreClinicalCellLine.__table__,
         PreClinicalSample.__table__,
         PreClinicalTreatmentResponse.__table__,
@@ -328,10 +328,10 @@ def chunked(items: list[Any], size: int) -> Iterable[list[Any]]:
         yield items[start : start + size]
 
 
-def find_dataset_by_name(session: Session, dataset_name: str) -> PreClinicalDataset | None:
+def find_dataset_by_name(session: Session, dataset_name: str) -> Dataset | None:
     return session.scalar(
-        select(PreClinicalDataset).where(
-            func.lower(PreClinicalDataset.name) == dataset_name.lower()
+        select(Dataset).where(
+            func.lower(Dataset.name) == dataset_name.lower()
         )
     )
 
@@ -423,7 +423,7 @@ def delete_existing_dataset(session: Session, dataset_name: str) -> None:
     )
     session.execute(delete(PreClinicalSample).where(PreClinicalSample.dataset_id == dataset.id))
     session.execute(delete(PreClinicalCellLine).where(PreClinicalCellLine.dataset_id == dataset.id))
-    session.execute(delete(PreClinicalDataset).where(PreClinicalDataset.id == dataset.id))
+    session.execute(delete(Dataset).where(Dataset.id == dataset.id))
     session.flush()
 
 
@@ -432,12 +432,12 @@ def get_or_create_dataset(
     *,
     dataset_name: str,
     metadata_csv: Path,
-) -> PreClinicalDataset:
+) -> Dataset:
     metadata = load_dataset_metadata(dataset_name, metadata_csv)
     dataset = find_dataset_by_name(session, metadata["name"])
 
     if dataset is None:
-        dataset = PreClinicalDataset(**metadata)
+        dataset = Dataset(**metadata)
         session.add(dataset)
         session.flush()
         return dataset
