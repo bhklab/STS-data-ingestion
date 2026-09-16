@@ -8,11 +8,16 @@ import pandas as pd
 load_dotenv(override=True)
 
 
-def alchemy_engine():
-    password_cleaned = quote_plus(os.getenv("DATABASE_PASS"))
+def alchemy_engine(**kwargs):
+    password_cleaned = quote_plus(os.getenv("DATABASE_PASS", ""))
+    connect_args = kwargs.pop("connect_args", {})
+    connect_args.setdefault("local_infile", True)
+    echo = kwargs.pop("echo", False)
     engine = create_engine(
         f"mysql+pymysql://{os.getenv('DATABASE_USER')}:{password_cleaned}"
         f"@{os.getenv('DATABASE_IP')}:{os.getenv('PORT')}/{os.getenv('SELECTED_DB')}",
-        echo=True,
+        connect_args=connect_args,
+        echo=echo,
+        **kwargs,
     )
     return engine
