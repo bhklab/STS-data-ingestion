@@ -1,6 +1,6 @@
 [workspace]
 authors = ["mattbocc <matthew.boccalon@live.ca>", "MessereN <>"]
-channels = ["conda-forge"]
+channels = ["conda-forge", "bioconda"]
 name = "STS-data-ingestion"
 platforms = ["osx-arm64", "linux-64"]
 version = "0.1.0"
@@ -14,3 +14,13 @@ pandas = ">=3.0.5,<4"
 python-dotenv = ">=1.2.2,<2"
 requests = ">=2.34.2,<3"
 pymysql = ">=1.2.0,<2"
+
+"r-data.table" = "*"
+"bioconductor-summarizedexperiment" = "*"
+"bioconductor-s4vectors" = "*"
+"bioconductor-mirbaseconverter" = "*"
+"bioconductor-biomart" = "*"
+r-biocmanager = ">=1.30.27,<2"
+
+[target.linux-64.dependencies]
+"bioconductor-pharmacogx" = "*"

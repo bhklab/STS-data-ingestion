@@ -1,0 +1,26 @@
+name,version,software,link,publication,PMID,description,key study findings,clinical
+CCLE,2019,,https://www.orcestra.ca/pset/691b7d79f27eb50d59c52e80,2012,PMID: 22460905,"Cancer Cell Line Encyclopedia (CCLE) includes multi-platform molecular and pharmacogenomic data across diverse cancer cell lines. 
+Available data include RNA-seq, somatic mutations, copy-number alterations, gene fusions, DNA methylation, proteomics, metabolomics, 
+miRNA expression, and drug-response measurements, supporting molecular characterization, biomarker discovery, and investigation of 
+therapeutic vulnerabilities.",,FALSE
+GDSCv2,2020,PharmacoGx v3.16.0,https://www.orcestra.ca/pset/61bb751a308ac5003a648fbe,2013,PMID 23180760,"Genomics of Drug Sensitivity in Cancer (GDSC) v2 includes pharmacogenomic and molecular data across a large collection of cancer cell lines. 
+The data were generated and shared by the Wellcome Trust Sanger Institute as part of the GDSC Programme and are available through the 
+CancerRxGene resource (www.cancerRxgene.org). Available data include treatment response, RNA-seq, microarray expression, mutations, 
+copy number variation, and gene fusions. GDSC v2 represents a distinct drug-screening dataset with a different compound panel and experimental
+ set, supporting the identification and validation of molecular biomarkers and predictors of anticancer drug response.",,FALSE
+CTRPv2,2015,PharmacoGx v3.16.0,https://www.orcestra.ca/pset/5ef3659e785cc307d861e79b,2015,PMID: 26482930,"Cancer Therapeutics Response Portal version 2 (CTRP v2) includes pharmacogenomic and molecular data across a large panel of cancer cell lines. 
+Available data include treatment response to small-molecule compounds together with genomic and cellular features of the corresponding cell lines. 
+The dataset supports identification of molecular biomarkers associated with drug sensitivity, investigation of small-molecule mechanisms of action, and 
+discovery of cancer-specific therapeutic vulnerabilities.",,FALSE
+gCSI,2019,PharmacoGx v3.16.0,https://www.orcestra.ca/pset/60c3dc783940cf1de1bbc298,2015,PMID: 25485619,"Genentech Cell Line Screening Initiative (gCSI) includes transcriptomic, genomic, and pharmacogenomic data across a large panel of human cancer 
+cell lines. Available data include RNA-seq, gene expression, mutations, gene fusions, copy number variation from SNP arrays, and treatment 
+response. The dataset supports characterization of cancer cell-line molecular features and integration of genomic and transcriptomic profiles to 
+identify pathways and biomarkers associated with response to targeted therapies.",,FALSE
+PRISM,2020,PharmacoGx v3.16.0,https://www.orcestra.ca/pset/611d353d01d3364d6cb9978f,2020,PMID: 32613204,"Profiling Relative Inhibition Simultaneously in Mixtures (PRISM) includes large-scale pharmacologic screening data across diverse human cancer 
+cell lines. Using a molecular barcoding approach, PRISM measures growth inhibition across pooled cell-line models and links drug-response patterns 
+with molecular features. The dataset includes responses to thousands of compounds, including many non-oncology drugs, and supports drug 
+repurposing, biomarker discovery, and identification of molecular features associated with selective drug sensitivity.",,FALSE
+TCGA-SARC,,TCGAbiolinks v2.38.0,,2017,PMID: 29100075,"TCGA-SARC includes multi-platform molecular, pathology, and clinical data 
+across six major adult soft tissue sarcoma subtypes. Available data include 
+gene expression, somatic mutations, copy-number alterations, DNA 
+methylation, proteomics, H&E pathology, and clinical/outcome annotations.","Complex-karyotype sarcomas are driven largely by copy-number alterations, with relatively low mutational burden. Recurrent alterations include TP53, ATRX, and RB1. Molecular and regulatory heterogeneity defines sarcoma subgroups associated with patient outcome. Immune microenvironment features inferred from transcriptomic and methylation data are also associated with outcome and may have relevance to immunotherapy.",TRUE

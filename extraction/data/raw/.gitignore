@@ -1,2 +1,11 @@
-*
+# 1. Ignore all files everywhere down the tree
+**/*
+
+# 2. Do NOT ignore any directories (keeps the doors open for Git to find files)
+!**/
+
+# 3. Allow your specific files
 !.gitignore
+!**/All_Psets_sarcoma_cell_line_QC.csv
+!**/biomart_genes.csv
+!**/combined_datasets.csv

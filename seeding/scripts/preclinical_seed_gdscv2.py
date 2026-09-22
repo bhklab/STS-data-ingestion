@@ -18,6 +18,7 @@ from ..models.tables import (
     PreClinicalDataset,
     PreClinicalGene,
     PreClinicalMicroarray,
+    PreClinicalMutation,
     PreClinicalRnaSeq,
     PreClinicalSample,
     PreClinicalTreatmentResponse,
@@ -26,12 +27,13 @@ from ..models.tables import (
 
 DEFAULT_DATA_DIR = Path("extraction/data/proc/preclinical/GDSCv2")
 DEFAULT_DATASET_NAME = "GDSCv2"
-SAMPLE_ID_PREFIX = "gdsc_"
+SAMPLE_ID_PREFIX = "gdscv2_"
 DEFAULT_DATASET_METADATA_CSV = Path("extraction/data/raw/preclinical/combined_datasets.csv")
 DEFAULT_CHUNK_SIZE = 100_000
 LOAD_RNA_SEQ = True
 LOAD_MICROARRAY = True
 LOAD_CNV = True
+LOAD_MUTATION = True
 RNA_TRANSFORM = "log2_tpm_plus_pseudocount_to_log2_tpm_plus_one"
 # RNA-seq is standardized to log2(TPM + 1) during seeding.
 CNV_TRANSFORM = "none"
@@ -107,6 +109,15 @@ def linear_cnv_to_log2(value: float | None) -> float | None:
     return out
 
 
+def mutation_value_to_binary(value: Any) -> int | None:
+    """Map mutation calls to a binary flag: wt -> 0, any other non-missing value -> 1."""
+    value = clean_value(value)
+    if value is None:
+        return None
+
+    return 0 if str(value).strip().lower() == "wt" else 1
+
+
 def get_value_transform(transform_name: str) -> Callable[[float | None], float | None] | None:
     if transform_name == "tpm_to_log2_tpm_plus_one":
         return tpm_to_log2_tpm_plus_one
@@ -132,6 +143,7 @@ def build_molecular_load_plan() -> tuple[dict[str, Any], ...]:
                 "model": PreClinicalRnaSeq,
                 "required_columns": REQUIRED_MOLECULAR_COLUMNS,
                 "value_transform": get_value_transform(RNA_TRANSFORM),
+                "value_kind": "numeric",
             }
         )
 
@@ -143,6 +155,7 @@ def build_molecular_load_plan() -> tuple[dict[str, Any], ...]:
                 "model": PreClinicalMicroarray,
                 "required_columns": REQUIRED_MOLECULAR_COLUMNS,
                 "value_transform": None,
+                "value_kind": "numeric",
             }
         )
 
@@ -154,14 +167,23 @@ def build_molecular_load_plan() -> tuple[dict[str, Any], ...]:
                 "model": PreClinicalCopyNumberVariation,
                 "required_columns": REQUIRED_MOLECULAR_COLUMNS,
                 "value_transform": get_value_transform(CNV_TRANSFORM),
+                "value_kind": "numeric",
+            }
+        )
+
+    if LOAD_MUTATION:
+        plan.append(
+            {
+                "label": "mutation",
+                "filename": "pre_clinical_mutation.csv",
+                "model": PreClinicalMutation,
+                "required_columns": REQUIRED_MOLECULAR_COLUMNS,
+                "value_transform": None,
+                "value_kind": "mutation_binary",
             }
         )
 
     return tuple(plan)
-
-
-# Intentionally excluded for now:
-#   pre_clinical_mutation.csv -> PreClinicalMutation
 
 
 def clean_value(value: Any) -> Any | None:
@@ -324,7 +346,7 @@ def validate_final_tables_model() -> None:
         raise RuntimeError("tables.py must define PreClinicalSample.cell_line_name.")
     if not hasattr(PreClinicalTreatmentResponse, "cid"):
         raise RuntimeError("tables.py must define PreClinicalTreatmentResponse.cid.")
-    for model in (PreClinicalRnaSeq, PreClinicalMicroarray, PreClinicalCopyNumberVariation):
+    for model in (PreClinicalRnaSeq, PreClinicalMicroarray, PreClinicalCopyNumberVariation, PreClinicalMutation):
         if not hasattr(model, "value"):
             raise RuntimeError(f"tables.py must define {model.__name__}.value.")
 
@@ -337,7 +359,7 @@ def create_required_tables(engine) -> None:
         PreClinicalTreatmentResponse.__table__,
     ]
 
-    if LOAD_RNA_SEQ or LOAD_MICROARRAY or LOAD_CNV:
+    if LOAD_RNA_SEQ or LOAD_MICROARRAY or LOAD_CNV or LOAD_MUTATION:
         tables.append(PreClinicalGene.__table__)
     if LOAD_RNA_SEQ:
         tables.append(PreClinicalRnaSeq.__table__)
@@ -345,6 +367,8 @@ def create_required_tables(engine) -> None:
         tables.append(PreClinicalMicroarray.__table__)
     if LOAD_CNV:
         tables.append(PreClinicalCopyNumberVariation.__table__)
+    if LOAD_MUTATION:
+        tables.append(PreClinicalMutation.__table__)
 
     Base.metadata.create_all(bind=engine, tables=tables)
 
@@ -673,6 +697,7 @@ def seed_molecular_file(
     valid_gene_ids: set[str],
     chunksize: int,
     value_transform: Callable[[float | None], float | None] | None = None,
+    value_kind: str = "numeric",
 ) -> None:
     path = data_dir / filename
     total_insert_candidates = 0
@@ -684,10 +709,15 @@ def seed_molecular_file(
         chunk_df = chunk_df.copy()
         chunk_df["sample_id"] = chunk_df["sample_id"].map(clean_str)
         chunk_df["gene_id"] = chunk_df["gene_id"].map(clean_gene_id)
-        chunk_df["__value"] = chunk_df["value"].map(clean_float)
 
-        if value_transform is not None:
-            chunk_df["__value"] = chunk_df["__value"].map(value_transform)
+        if value_kind == "mutation_binary":
+            chunk_df["__value"] = chunk_df["value"].map(mutation_value_to_binary)
+        elif value_kind == "numeric":
+            chunk_df["__value"] = chunk_df["value"].map(clean_float)
+            if value_transform is not None:
+                chunk_df["__value"] = chunk_df["__value"].map(value_transform)
+        else:
+            raise ValueError(f"Unknown value_kind: {value_kind}")
 
         chunk_df = chunk_df[chunk_df["sample_id"].notna() & chunk_df["gene_id"].notna()]
 
@@ -721,7 +751,7 @@ def seed_molecular_file(
             {
                 "sample_id": row["sample_id"],
                 "gene_id": row["gene_id"],
-                "value": float(row["__value"]),
+                "value": int(row["__value"]) if value_kind == "mutation_binary" else float(row["__value"]),
             }
             for row in chunk_df.to_dict(orient="records")
         ]
@@ -803,15 +833,16 @@ def seed_dataset(
                     valid_gene_ids=valid_gene_ids,
                     chunksize=chunksize,
                     value_transform=plan["value_transform"],
+                    value_kind=plan["value_kind"],
                 )
                 session.commit()
 
-    print(f"Finished GDSCv2 preclinical seeding. Mutation upload was skipped.")
+    print(f"Finished GDSCv2 preclinical seeding, including binary mutation values (wt=0, other non-missing=1).")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description=f"Seed the GDSCv2 preclinical dataset from extracted CSVs. Mutation upload is intentionally skipped."
+        description=f"Seed the GDSCv2 preclinical dataset from extracted CSVs, including binary mutation calls."
     )
     parser.add_argument(
         "--data-dir",

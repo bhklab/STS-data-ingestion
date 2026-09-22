@@ -25,18 +25,18 @@ from ..models.tables import (
 )
 
 
-DEFAULT_DATA_DIR = Path("extraction/data/proc/preclinical/CCLE")
-DEFAULT_DATASET_NAME = "CCLE"
-SAMPLE_ID_PREFIX = "CCLE_"
+DEFAULT_DATA_DIR = Path("extraction/data/proc/preclinical/GDSCv1")
+DEFAULT_DATASET_NAME = "GDSCv1"
+SAMPLE_ID_PREFIX = "gdscv1_"
 DEFAULT_DATASET_METADATA_CSV = Path("extraction/data/raw/preclinical/combined_datasets.csv")
 DEFAULT_CHUNK_SIZE = 100_000
 LOAD_RNA_SEQ = True
 LOAD_MICROARRAY = True
 LOAD_CNV = True
 LOAD_MUTATION = True
-RNA_TRANSFORM = "tpm_to_log2_tpm_plus_one"
+RNA_TRANSFORM = "log2_tpm_plus_pseudocount_to_log2_tpm_plus_one"
 # RNA-seq is standardized to log2(TPM + 1) during seeding.
-CNV_TRANSFORM = "linear_cnv_to_log2"
+CNV_TRANSFORM = "none"
 
 
 REQUIRED_CELL_LINE_COLUMNS = {
@@ -256,13 +256,13 @@ def clean_bool(value: Any) -> bool | None:
 
 def read_csv(path: Path) -> pd.DataFrame:
     if not path.exists():
-        raise FileNotFoundError(f"Missing required CCLE CSV: {path}")
+        raise FileNotFoundError(f"Missing required GDSCv1 CSV: {path}")
     return pd.read_csv(path, dtype=str, keep_default_na=False, na_values=[])
 
 
 def iter_csv_chunks(path: Path, *, chunksize: int) -> Iterable[pd.DataFrame]:
     if not path.exists():
-        raise FileNotFoundError(f"Missing required CCLE CSV: {path}")
+        raise FileNotFoundError(f"Missing required GDSCv1 CSV: {path}")
 
     yield from pd.read_csv(
         path,
@@ -314,7 +314,7 @@ def ensure_prefixed_sample_ids(sample_ids: list[Any], *, auto_prefix: bool) -> l
     if unprefixed:
         preview = ", ".join(unprefixed[:10])
         raise ValueError(
-            f"CCLE sample IDs must already be prefixed before database insert. "
+            f"GDSCv1 sample IDs must already be prefixed before database insert. "
             f"Found unprefixed sample IDs, for example: {preview}. "
             "Fix the extractor output or rerun with --auto-prefix-samples."
         )
@@ -412,10 +412,12 @@ def load_dataset_metadata(dataset_name: str, metadata_csv: Path) -> dict[str, An
 
     match = df[df["name"].str.lower() == dataset_name.lower()]
     if match.empty:
-        raise ValueError(
-            f"Could not find dataset {dataset_name!r} in {metadata_csv}. "
-            f"Available names: {', '.join(df['name'].tolist())}"
+        print(
+            f"Dataset {dataset_name!r} was not found in {metadata_csv}. "
+            "Seeding the datasets row with the dataset name only; add a GDSCv1 row "
+            "to combined_datasets.csv later if you want the metadata fields populated."
         )
+        return metadata
 
     row = match.iloc[0].to_dict()
     metadata.update(
@@ -535,7 +537,7 @@ def seed_cell_lines(session: Session, *, dataset_id: int, data_dir: Path) -> dic
             )
         ).all()
     )
-    print(f"Seeded CCLE cell lines: {len(lookup)}")
+    print(f"Seeded GDSCv1 cell lines: {len(lookup)}")
     return lookup
 
 
@@ -565,7 +567,7 @@ def seed_samples(
     if missing_cell_lines:
         preview = ", ".join(missing_cell_lines[:20])
         raise ValueError(
-            f"Some CCLE sample rows reference cell lines that were not loaded into "
+            f"Some GDSCv1 sample rows reference cell lines that were not loaded into "
             f"pre_clinical_cell_line for dataset_id={dataset_id}. Examples: {preview}"
         )
 
@@ -582,7 +584,7 @@ def seed_samples(
     session.flush()
 
     sample_ids = set(sample_df["__id"])
-    print(f"Seeded CCLE samples: {len(rows)}")
+    print(f"Seeded GDSCv1 samples: {len(rows)}")
     return sample_ids
 
 
@@ -609,7 +611,7 @@ def seed_treatment_response(
     if missing_cell_lines:
         preview = ", ".join(missing_cell_lines[:20])
         raise ValueError(
-            f"Some CCLE treatment-response rows reference cell lines that were not "
+            f"Some GDSCv1 treatment-response rows reference cell lines that were not "
             f"loaded into pre_clinical_cell_line for dataset_id={dataset_id}. "
             f"Examples: {preview}"
         )
@@ -633,7 +635,7 @@ def seed_treatment_response(
         session.bulk_insert_mappings(PreClinicalTreatmentResponse, rows)
         session.flush()
 
-    print(f"Seeded CCLE treatment responses: {len(rows)}")
+    print(f"Seeded GDSCv1 treatment responses: {len(rows)}")
 
 
 def seed_genes(session: Session, *, data_dir: Path) -> set[str]:
@@ -661,7 +663,7 @@ def seed_genes(session: Session, *, data_dir: Path) -> set[str]:
 
     gene_ids = set(gene_df["id"])
     print(
-        f"Inserted new CCLE genes where absent; existing gene IDs were skipped. "
+        f"Inserted new GDSCv1 genes where absent; existing gene IDs were skipped. "
         f"Candidate gene IDs: {len(gene_ids)}"
     )
     return gene_ids
@@ -680,7 +682,7 @@ def validate_molecular_samples_prefixed(sample_ids: set[str], *, label: str) -> 
     if unprefixed:
         preview = ", ".join(unprefixed[:10])
         raise ValueError(
-            f"CCLE {label} contains unprefixed sample_id values. Examples: {preview}. "
+            f"GDSCv1 {label} contains unprefixed sample_id values. Examples: {preview}. "
             "Fix the extractor output before loading."
         )
 
@@ -728,7 +730,7 @@ def seed_molecular_file(
         if missing_sample_ids:
             preview = ", ".join(missing_sample_ids[:20])
             raise ValueError(
-                f"CCLE {label} has sample_id values missing from pre_clinical_sample. "
+                f"GDSCv1 {label} has sample_id values missing from pre_clinical_sample. "
                 f"Examples: {preview}"
             )
 
@@ -737,7 +739,7 @@ def seed_molecular_file(
         if missing_gene_ids:
             preview = ", ".join(missing_gene_ids[:20])
             raise ValueError(
-                f"CCLE {label} has gene_id values missing from pre_clinical_gene. "
+                f"GDSCv1 {label} has gene_id values missing from pre_clinical_gene. "
                 f"Examples: {preview}"
             )
 
@@ -762,10 +764,10 @@ def seed_molecular_file(
             session.flush()
 
         total_insert_candidates += len(rows)
-        print(f"Seeded CCLE {label} chunk {chunk_index}: {len(rows)} candidate rows")
+        print(f"Seeded GDSCv1 {label} chunk {chunk_index}: {len(rows)} candidate rows")
 
     print(
-        f"Finished CCLE {label}: {total_insert_candidates} candidate rows. "
+        f"Finished GDSCv1 {label}: {total_insert_candidates} candidate rows. "
         f"Skipped non-finite/missing values: {total_skipped_missing_value}"
     )
 
@@ -785,7 +787,7 @@ def seed_dataset(
 
     with Session(engine) as session:
         if replace:
-            print(f"Replacing existing dataset rows for {CCLE}")
+            print(f"Replacing existing dataset rows for {dataset_name}")
             delete_existing_dataset(session, dataset_name)
             session.commit()
 
@@ -837,18 +839,18 @@ def seed_dataset(
                 )
                 session.commit()
 
-    print(f"Finished CCLE preclinical seeding, including binary mutation values (wt=0, other non-missing=1).")
+    print(f"Finished GDSCv1 preclinical seeding, including binary mutation values (wt=0, other non-missing=1).")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description=f"Seed the CCLE preclinical dataset from extracted CSVs, including binary mutation calls."
+        description=f"Seed the GDSCv1 preclinical dataset from extracted CSVs, including binary mutation calls."
     )
     parser.add_argument(
         "--data-dir",
         type=Path,
         default=DEFAULT_DATA_DIR,
-        help=f"Directory containing CCLE extracted CSVs. Default: {DEFAULT_DATA_DIR}",
+        help=f"Directory containing GDSCv1 extracted CSVs. Default: {DEFAULT_DATA_DIR}",
     )
     parser.add_argument(
         "--dataset-name",
@@ -868,7 +870,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--replace",
         action="store_true",
-        help=f"Delete existing CCLE dataset rows before reloading.",
+        help=f"Delete existing GDSCv1 dataset rows before reloading.",
     )
     parser.add_argument(
         "--auto-prefix-samples",

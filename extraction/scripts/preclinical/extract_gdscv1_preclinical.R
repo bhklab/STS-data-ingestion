@@ -19,50 +19,43 @@ if (exists("mem.maxVSize", mode = "function")) {
 DATASET_ID <- 1
 
 # You can override this from the shell if the filename differs:
-#   GDSCV2_RDS_PATH=/path/to/PSet_GDSCv2.rds Rscript extract_gdscv2_preclinical.R
-GDSCV2_RDS_PATH <- Sys.getenv(
-  "GDSCV2_RDS_PATH",
-  unset = "extraction/data/raw/preclinical/PSet_GDSCv2.rds"
+#   GDSCV1_RDS_PATH=/path/to/PSet_GDSCv1.rds Rscript extract_gdscv1_preclinical.R
+GDSCV1_RDS_PATH <- Sys.getenv(
+  "GDSCV1_RDS_PATH",
+  unset = "extraction/data/raw/preclinical/PSet_GDSCv1.rds"
 )
 
 SHEET_CELL_LINE_QC_PATH <- "extraction/data/raw/preclinical/All_PSets_sarcoma_cell_line_QC.csv"
 
-OUT_DIR <- "extraction/data/proc/preclinical/GDSCv2"
+OUT_DIR <- "extraction/data/proc/preclinical/GDSCv1"
 
 dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
 
 # New extraction set:
 #   1. Read external QC sheet.
 #   2. Keep rows where mod_tissueid == "Soft Tissue".
-#   3. Match sheet$cell_line against GDSCv2 sample-slot sampleid.
+#   3. Match sheet$cell_line against GDSCv1 sample-slot sampleid.
 SHEET_TARGET_CELL_LINE_COL <- "cell_line"
 
-# Per requirement, GDSCv2 uses sample slot sampleid as both source sample ID
+# Per requirement, GDSCv1 uses sample slot sampleid as both source sample ID
 # and final cell_line_name before adding the sample ID prefix.
-GDSCv2_CELL_LINE_NAME_CANDIDATES <- c("sampleid")
+GDSCv1_CELL_LINE_NAME_CANDIDATES <- c("sampleid")
 
 # Original criteria are audit-only.
 # They DO NOT control the final extraction set anymore.
-TARGET_CELL_LINES_RAW <- paste0(
-  "CAL-78|ESS-1|H-EMC-SS|Hs 633.T|Hs 819.T|KYM-1|MFH-ino|",
-  "NCI-H28|Rh18|SK-LMS-1|SNU-685|SW982|TE 441.T|CHSA0108|",
-  "DM-3|H-EMC-SS|Hs 819.T|MFH-ino|NCI-H2731|RKN|SK-LMS-1|",
-  "SW1353|TE 441.T|105KC|CHSA8926|DM-3|HT-1080|MFH-ino|",
-  "NCI-H2731|RD|SNU-1077|SW1353|SW982|105KC|CHSA0011|",
-  "CHSA0011|GCT|HT-1080|Hs 729.T|JJ012|MES-SA|NCI-H2052|",
-  "OUMS-27|Rh30|SK-UT-1|SW1353|SYO-1|TE 617.T|CHSA8926|",
-  "ESS-1|HT-1080|JJ012|NCI-H2052|NCI-H28|RS-5|SK-UT-1|",
-  "SW684|TE 617.T|A-204|CS-1 [Human chondrosarcoma]|ESS-1|",
-  "Hs 633.T|NCI-H2052|NCI-H28|RKN|SNU-685|SW684|SYO-1|",
-  "A-204|CHSA0108"
-)
+TARGET_CELL_LINES_RAW <- ""
+
+# No GDSCv1-specific original cell-line target list was supplied.
+# The original-criteria audit therefore retains only the historical tissue-based
+# conditions (tissueid / GDSC tissue descriptors). Final extraction is still
+# controlled exclusively by the external QC sheet mod_tissueid == "Soft Tissue".
 
 TARGET_CELL_LINES <- unique(trimws(
   unlist(strsplit(TARGET_CELL_LINES_RAW, "\\|"))
 ))
 
-# Final output sample IDs will look like gdscv2_A-204, gdscv2_CAL-78, etc.
-SAMPLE_ID_PREFIX <- "gdscv2_"
+# Final output sample IDs will look like gdscv1_A-204, gdscv1_CAL-78, etc.
+SAMPLE_ID_PREFIX <- "gdscv1_"
 
 RNA_SEQ_PROFILE_NAME <- "Kallisto_0.46.1.rnaseq"
 MICROARRAY_PROFILE_NAME <- "rna"
@@ -240,17 +233,17 @@ require_profile <- function(pset, profile_name) {
   profile
 }
 
-resolve_gdscv2_cell_line_col <- function(sample_dt) {
+resolve_gdscv1_cell_line_col <- function(sample_dt) {
   col <- first_existing_col(
     sample_dt,
-    GDSCv2_CELL_LINE_NAME_CANDIDATES
+    GDSCv1_CELL_LINE_NAME_CANDIDATES
   )
 
   if (is.na(col)) {
     stop(
-      "Could not find a GDSCv2 sample-slot cell-line-name column. ",
+      "Could not find a GDSCv1 sample-slot cell-line-name column. ",
       "Expected one of: ",
-      paste(GDSCv2_CELL_LINE_NAME_CANDIDATES, collapse = ", "),
+      paste(GDSCv1_CELL_LINE_NAME_CANDIDATES, collapse = ", "),
       ". Available columns are: ",
       paste(colnames(sample_dt), collapse = ", ")
     )
@@ -277,7 +270,7 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
 
   fwrite(
     data.table(column_name = colnames(sheet_dt)),
-    file.path(out_dir, "gdscv2_sheet_column_names.csv")
+    file.path(out_dir, "gdscv1_sheet_column_names.csv")
   )
 
   required_cols <- c(
@@ -293,7 +286,7 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
       "QC sheet is missing required columns: ",
       paste(missing_required, collapse = ", "),
       ". See: ",
-      file.path(out_dir, "gdscv2_sheet_column_names.csv")
+      file.path(out_dir, "gdscv1_sheet_column_names.csv")
     )
   }
 
@@ -441,12 +434,12 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
 
   fwrite(
     sheet_soft_tissue_dt,
-    file.path(out_dir, "gdscv2_sheet_soft_tissue_rows.csv")
+    file.path(out_dir, "gdscv1_sheet_soft_tissue_rows.csv")
   )
 
   fwrite(
     sheet_soft_tissue_metadata_dt,
-    file.path(out_dir, "gdscv2_sheet_soft_tissue_cell_line_metadata.csv")
+    file.path(out_dir, "gdscv1_sheet_soft_tissue_cell_line_metadata.csv")
   )
 
   fwrite(
@@ -468,7 +461,7 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
         )
       ]
     ),
-    file.path(out_dir, "gdscv2_sheet_soft_tissue_cell_line_targets.csv")
+    file.path(out_dir, "gdscv1_sheet_soft_tissue_cell_line_targets.csv")
   )
 
   cat("QC-sheet soft tissue rows:", nrow(sheet_soft_tissue_dt), "\n")
@@ -481,48 +474,48 @@ read_qc_sheet_soft_tissue_targets <- function(path, out_dir) {
 }
 
 # -------------------------------------------------------------------------
-# GDSCv2 sample selection and original-criteria audit
+# GDSCv1 sample selection and original-criteria audit
 # -------------------------------------------------------------------------
 
-build_gdscv2_selection <- function(
-  pset_gdscv2,
+build_gdscv1_selection <- function(
+  pset_gdscv1,
   target_cell_lines,
   sheet_soft_tissue_metadata_dt,
   out_dir
 ) {
-  sample_dt <- as.data.table(pset_gdscv2@sample, keep.rownames = "sample_rowname")
+  sample_dt <- as.data.table(pset_gdscv1@sample, keep.rownames = "sample_rowname")
 
   fwrite(
     data.table(column_name = colnames(sample_dt)),
-    file.path(out_dir, "gdscv2_sample_slot_columns.csv")
+    file.path(out_dir, "gdscv1_sample_slot_columns.csv")
   )
 
-  gdscv2_cell_line_col <- resolve_gdscv2_cell_line_col(sample_dt)
+  gdscv1_cell_line_col <- resolve_gdscv1_cell_line_col(sample_dt)
 
   fwrite(
     data.table(
-      gdscv2_cell_line_name_column_used = gdscv2_cell_line_col
+      gdscv1_cell_line_name_column_used = gdscv1_cell_line_col
     ),
-    file.path(out_dir, "gdscv2_cell_line_name_column_used.csv")
+    file.path(out_dir, "gdscv1_cell_line_name_column_used.csv")
   )
 
   sample_dt[
     ,
-    gdscv2_cell_line_name := clean_na(get(gdscv2_cell_line_col))
+    gdscv1_cell_line_name := clean_na(get(gdscv1_cell_line_col))
   ]
 
   sample_dt[
     ,
-    normalized_gdscv2_cell_line_name := normalize_cell_line_name(gdscv2_cell_line_name)
+    normalized_gdscv1_cell_line_name := normalize_cell_line_name(gdscv1_cell_line_name)
   ]
 
   # New extraction criterion only:
   # QC sheet mod_tissueid == "Soft Tissue", matched by sheet$cell_line to the
-  # one resolved GDSCv2 sample-slot cell-line-name column.
+  # one resolved GDSCv1 sample-slot cell-line-name column.
   sample_dt[
     ,
     new_sheet_soft_tissue_match :=
-      normalized_gdscv2_cell_line_name %in%
+      normalized_gdscv1_cell_line_name %in%
         sheet_soft_tissue_metadata_dt$normalized_sheet_cell_line_name
   ]
 
@@ -532,9 +525,9 @@ build_gdscv2_selection <- function(
 
   if (nrow(selected_sample_dt) == 0) {
     stop(
-      "No GDSCv2 samples matched QC-sheet mod_tissueid == 'Soft Tissue' ",
-      "cell lines using GDSCv2 sample-slot column: ",
-      gdscv2_cell_line_col
+      "No GDSCv1 samples matched QC-sheet mod_tissueid == 'Soft Tissue' ",
+      "cell lines using GDSCv1 sample-slot column: ",
+      gdscv1_cell_line_col
     )
   }
 
@@ -556,17 +549,17 @@ build_gdscv2_selection <- function(
         sheet_age = age_raw
       )
     ],
-    by.x = "normalized_gdscv2_cell_line_name",
+    by.x = "normalized_gdscv1_cell_line_name",
     by.y = "normalized_sheet_cell_line_name",
     all.x = TRUE
   )
 
-  # Per GDSCv2 requirement, the PharmacoSet sample slot sampleid is the
+  # Per GDSCv1 requirement, the PharmacoSet sample slot sampleid is the
   # canonical source sample ID and cell-line name. QC sheet metadata is used
   # only for selecting rows and adding tissue/accession metadata.
   selected_sample_dt[
     ,
-    canonical_cell_line_name := clean_na(gdscv2_cell_line_name)
+    canonical_cell_line_name := clean_na(gdscv1_cell_line_name)
   ]
 
   selected_sample_dt[
@@ -635,7 +628,7 @@ build_gdscv2_selection <- function(
 
   original_criteria_dt[
     ,
-    original_cell_line_name := gdscv2_cell_line_name
+    original_cell_line_name := gdscv1_cell_line_name
   ]
 
   original_criteria_dt[
@@ -658,7 +651,7 @@ build_gdscv2_selection <- function(
     )),
     sample_id = make_prefixed_sample_id(clean_na(original_criteria_dt$original_cell_line_name)),
     cell_line_name = clean_na(original_criteria_dt$original_cell_line_name),
-    gdscv2_cell_line_name_column_used = gdscv2_cell_line_col,
+    gdscv1_cell_line_name_column_used = gdscv1_cell_line_col,
     tissueid = clean_na(safe_col(original_criteria_dt, c("tissueid"))),
     gdsc_tissue_descriptor_1 = clean_na(safe_col(original_criteria_dt, c("GDSC..Tissue.descriptor.1"))),
     gdsc_tissue_descriptor_2 = clean_na(safe_col(original_criteria_dt, c("GDSC..Tissue..descriptor.2"))),
@@ -673,7 +666,7 @@ build_gdscv2_selection <- function(
     )),
     sample_id = make_prefixed_sample_id(clean_na(original_not_in_final_dt$original_cell_line_name)),
     cell_line_name = clean_na(original_not_in_final_dt$original_cell_line_name),
-    gdscv2_cell_line_name_column_used = gdscv2_cell_line_col,
+    gdscv1_cell_line_name_column_used = gdscv1_cell_line_col,
     tissueid = clean_na(safe_col(original_not_in_final_dt, c("tissueid"))),
     gdsc_tissue_descriptor_1 = clean_na(safe_col(original_not_in_final_dt, c("GDSC..Tissue.descriptor.1"))),
     gdsc_tissue_descriptor_2 = clean_na(safe_col(original_not_in_final_dt, c("GDSC..Tissue..descriptor.2"))),
@@ -683,12 +676,12 @@ build_gdscv2_selection <- function(
 
   fwrite(
     original_audit_dt,
-    file.path(out_dir, "gdscv2_original_criteria_cell_line_list_audit_only.csv")
+    file.path(out_dir, "gdscv1_original_criteria_cell_line_list_audit_only.csv")
   )
 
   fwrite(
     original_not_in_final_audit_dt,
-    file.path(out_dir, "gdscv2_original_criteria_not_in_final_new_criteria.csv")
+    file.path(out_dir, "gdscv1_original_criteria_not_in_final_new_criteria.csv")
   )
 
   fwrite(
@@ -698,8 +691,8 @@ build_gdscv2_selection <- function(
         sample_id = canonical_sample_id,
         source_sampleid,
         cell_line_name = final_cell_line_name,
-        gdscv2_cell_line_name,
-        gdscv2_cell_line_name_column_used = gdscv2_cell_line_col,
+        gdscv1_cell_line_name,
+        gdscv1_cell_line_name_column_used = gdscv1_cell_line_col,
         sheet_cell_line_name,
         sheet_dataset,
         sheet_object_type,
@@ -712,16 +705,16 @@ build_gdscv2_selection <- function(
         sheet_age
       )
     ],
-    file.path(out_dir, "gdscv2_final_extracted_cell_line_list_new_criteria.csv")
+    file.path(out_dir, "gdscv1_final_extracted_cell_line_list_new_criteria.csv")
   )
 
   fwrite(
     selected_sample_dt,
-    file.path(out_dir, "gdscv2_selected_sample_slot_rows.csv")
+    file.path(out_dir, "gdscv1_selected_sample_slot_rows.csv")
   )
 
-  cat("GDSCv2 cell-line-name column used:", gdscv2_cell_line_col, "\n")
-  cat("Final new-criteria selected GDSCv2 sample rows:", nrow(selected_sample_dt), "\n")
+  cat("GDSCv1 cell-line-name column used:", gdscv1_cell_line_col, "\n")
+  cat("Final new-criteria selected GDSCv1 sample rows:", nrow(selected_sample_dt), "\n")
   cat("Original-criteria audit rows:", nrow(original_criteria_dt), "\n")
   cat("Original-criteria rows not in final new criteria:", nrow(original_not_in_final_dt), "\n")
 
@@ -729,17 +722,17 @@ build_gdscv2_selection <- function(
     selected_sample_dt = selected_sample_dt,
     original_criteria_dt = original_criteria_dt,
     original_not_in_final_dt = original_not_in_final_dt,
-    gdscv2_cell_line_col = gdscv2_cell_line_col
+    gdscv1_cell_line_col = gdscv1_cell_line_col
   )
 }
 
-build_canonical_lookup_gdscv2 <- function(selected_sample_dt) {
+build_canonical_lookup_gdscv1 <- function(selected_sample_dt) {
   alt_cols <- c(
     "canonical_cell_line_name",
     "final_cell_line_name",
     "canonical_sample_id",
     "source_sampleid",
-    "gdscv2_cell_line_name",
+    "gdscv1_cell_line_name",
     "cellosaurus.cellLineName",
     "Cell.line.primary.name",
     "cell_line_name",
@@ -799,7 +792,7 @@ build_profile_column_map <- function(se, canonical_lookup, profile_label) {
 
   fwrite(
     data.table(column_name = colnames(cd)),
-    file.path(OUT_DIR, paste0("gdscv2_", profile_label, "_coldata_columns.csv"))
+    file.path(OUT_DIR, paste0("gdscv1_", profile_label, "_coldata_columns.csv"))
   )
 
   candidate_cols <- c(
@@ -839,7 +832,7 @@ build_profile_column_map <- function(se, canonical_lookup, profile_label) {
     warning(
       "No candidate mapping columns found in colData for profile ",
       profile_label,
-      ". See gdscv2_",
+      ". See gdscv1_",
       profile_label,
       "_coldata_columns.csv."
     )
@@ -1171,7 +1164,7 @@ finalize_gene_table <- function(gene_part_paths, out_dir) {
 }
 
 # -------------------------------------------------------------------------
-# GDSCv2 treatment response using summarizeSensitivityProfiles
+# GDSCv1 treatment response using summarizeSensitivityProfiles
 
 # -------------------------------------------------------------------------
 # Treatment CID helpers
@@ -1318,9 +1311,9 @@ add_treatment_cid <- function(treatment_response_dt, pset, out_path, label = "da
 
 # -------------------------------------------------------------------------
 
-get_available_cell_lines_for_sensitivity <- function(pset_gdscv2) {
+get_available_cell_lines_for_sensitivity <- function(pset_gdscv1) {
   out <- tryCatch(
-    cellNames(pset_gdscv2),
+    cellNames(pset_gdscv1),
     error = function(e) {
       character()
     }
@@ -1334,19 +1327,19 @@ get_available_cell_lines_for_sensitivity <- function(pset_gdscv2) {
   }
 
   sample_dt <- as.data.table(
-    pset_gdscv2@sample,
+    pset_gdscv1@sample,
     keep.rownames = "sample_rowname"
   )
 
   candidate_col <- first_existing_col(
     sample_dt,
-    GDSCv2_CELL_LINE_NAME_CANDIDATES
+    GDSCv1_CELL_LINE_NAME_CANDIDATES
   )
 
   if (is.na(candidate_col)) {
     stop(
-      "Could not determine available GDSCv2 cell lines. ",
-      "cellNames(pset_gdscv2) failed and no usable sample column was found."
+      "Could not determine available GDSCv1 cell lines. ",
+      "cellNames(pset_gdscv1) failed and no usable sample column was found."
     )
   }
 
@@ -1393,7 +1386,7 @@ summarized_sensitivity_to_long <- function(
     ),
     file.path(
       out_dir,
-      paste0("gdscv2_treatment_ids_from_", sensitivity_measure, ".csv")
+      paste0("gdscv1_treatment_ids_from_", sensitivity_measure, ".csv")
     )
   )
 
@@ -1403,7 +1396,7 @@ summarized_sensitivity_to_long <- function(
     ),
     file.path(
       out_dir,
-      paste0("gdscv2_cell_lines_from_", sensitivity_measure, ".csv")
+      paste0("gdscv1_cell_lines_from_", sensitivity_measure, ".csv")
     )
   )
 
@@ -1424,7 +1417,7 @@ summarized_sensitivity_to_long <- function(
   ]
 }
 
-extract_treatment_response_gdscv2 <- function(pset_gdscv2, canonical_lookup, out_path) {
+extract_treatment_response_gdscv1 <- function(pset_gdscv1, canonical_lookup, out_path) {
   selected_cell_line_lookup <- unique(
     canonical_lookup[
       source_column %in% c("canonical_cell_line_name", "final_cell_line_name"),
@@ -1451,16 +1444,16 @@ extract_treatment_response_gdscv2 <- function(pset_gdscv2, canonical_lookup, out
     )
   }
 
-  available_cell_lines <- get_available_cell_lines_for_sensitivity(pset_gdscv2)
+  available_cell_lines <- get_available_cell_lines_for_sensitivity(pset_gdscv1)
 
   available_lookup <- data.table(
-    gdscv2_cell_line_name_for_summary = available_cell_lines,
+    gdscv1_cell_line_name_for_summary = available_cell_lines,
     normalized_cell_line_name = normalize_cell_line_name(available_cell_lines)
   )
 
   available_lookup <- unique(
     available_lookup[
-      !is.na(gdscv2_cell_line_name_for_summary) &
+      !is.na(gdscv1_cell_line_name_for_summary) &
         !is.na(normalized_cell_line_name)
     ],
     by = "normalized_cell_line_name"
@@ -1475,36 +1468,36 @@ extract_treatment_response_gdscv2 <- function(pset_gdscv2, canonical_lookup, out
 
   fwrite(
     cell_line_match,
-    sub("\\.csv$", "_selected_cell_lines_available_in_gdscv2.csv", out_path)
+    sub("\\.csv$", "_selected_cell_lines_available_in_gdscv1.csv", out_path)
   )
 
-  missing_cell_lines <- cell_line_match[is.na(gdscv2_cell_line_name_for_summary)]
+  missing_cell_lines <- cell_line_match[is.na(gdscv1_cell_line_name_for_summary)]
 
   fwrite(
     missing_cell_lines,
-    sub("\\.csv$", "_selected_cell_lines_missing_from_gdscv2.csv", out_path)
+    sub("\\.csv$", "_selected_cell_lines_missing_from_gdscv1.csv", out_path)
   )
 
-  cell_lines_to_use <- unique(clean_na(cell_line_match$gdscv2_cell_line_name_for_summary))
+  cell_lines_to_use <- unique(clean_na(cell_line_match$gdscv1_cell_line_name_for_summary))
   cell_lines_to_use <- cell_lines_to_use[!is.na(cell_lines_to_use)]
 
   if (length(cell_lines_to_use) == 0) {
     stop(
-      "None of the selected GDSCv2 cell_line_name values matched sensitivity cell lines. ",
+      "None of the selected GDSCv1 cell_line_name values matched sensitivity cell lines. ",
       "See: ",
-      sub("\\.csv$", "_selected_cell_lines_missing_from_gdscv2.csv", out_path)
+      sub("\\.csv$", "_selected_cell_lines_missing_from_gdscv1.csv", out_path)
     )
   }
 
   aac_long <- summarized_sensitivity_to_long(
-    pset = pset_gdscv2,
+    pset = pset_gdscv1,
     sensitivity_measure = "aac_recomputed",
     cell_lines = cell_lines_to_use,
     out_dir = OUT_DIR
   )
 
   ic50_long <- summarized_sensitivity_to_long(
-    pset = pset_gdscv2,
+    pset = pset_gdscv1,
     sensitivity_measure = "ic50_recomputed",
     cell_lines = cell_lines_to_use,
     out_dir = OUT_DIR
@@ -1524,10 +1517,10 @@ extract_treatment_response_gdscv2 <- function(pset_gdscv2, canonical_lookup, out
 
   response_cell_line_lookup <- unique(
     cell_line_match[
-      !is.na(gdscv2_cell_line_name_for_summary),
+      !is.na(gdscv1_cell_line_name_for_summary),
       .(
         normalized_cell_line_name,
-        gdscv2_cell_line_name_for_summary,
+        gdscv1_cell_line_name_for_summary,
         sample_id,
         source_sampleid,
         cell_line_name
@@ -1577,9 +1570,9 @@ extract_treatment_response_gdscv2 <- function(pset_gdscv2, canonical_lookup, out
 
   treatment_response_dt <- add_treatment_cid(
     treatment_response_dt = treatment_response_dt,
-    pset = pset_gdscv2,
+    pset = pset_gdscv1,
     out_path = out_path,
-    label = "GDSCv2"
+    label = "GDSCv1"
   )
 
   # summarizeSensitivityProfiles(summary.stat = "mean") should already collapse
@@ -1623,18 +1616,18 @@ extract_treatment_response_gdscv2 <- function(pset_gdscv2, canonical_lookup, out
 
   fwrite(treatment_response_dt, out_path)
 
-  cat("Wrote GDSCv2 summarized treatment response rows:", nrow(treatment_response_dt), "\n")
+  cat("Wrote GDSCv1 summarized treatment response rows:", nrow(treatment_response_dt), "\n")
 }
 
 # -------------------------------------------------------------------------
-# Load GDSCv2
+# Load GDSCv1
 # -------------------------------------------------------------------------
 
 cat("\n==============================\n")
-cat("Loading GDSCv2\n")
+cat("Loading GDSCv1\n")
 cat("==============================\n")
 
-gdscv2 <- read_updated_rds(GDSCV2_RDS_PATH)
+gdscv1 <- read_updated_rds(GDSCV1_RDS_PATH)
 
 # -------------------------------------------------------------------------
 # Select samples/cell lines using external QC sheet new criteria only
@@ -1645,8 +1638,8 @@ sheet_target_data <- read_qc_sheet_soft_tissue_targets(
   out_dir = OUT_DIR
 )
 
-selection_data <- build_gdscv2_selection(
-  pset_gdscv2 = gdscv2,
+selection_data <- build_gdscv1_selection(
+  pset_gdscv1 = gdscv1,
   target_cell_lines = TARGET_CELL_LINES,
   sheet_soft_tissue_metadata_dt = sheet_target_data$sheet_soft_tissue_metadata_dt,
   out_dir = OUT_DIR
@@ -1654,14 +1647,14 @@ selection_data <- build_gdscv2_selection(
 
 selected_sample_dt <- selection_data$selected_sample_dt
 
-canonical_lookup <- build_canonical_lookup_gdscv2(selected_sample_dt)
+canonical_lookup <- build_canonical_lookup_gdscv1(selected_sample_dt)
 
 cat("Final new-criteria selected sample rows:", nrow(selected_sample_dt), "\n")
 cat("Canonical lookup rows:", nrow(canonical_lookup), "\n")
 
 fwrite(
   canonical_lookup,
-  file.path(OUT_DIR, "gdscv2_canonical_lookup.csv")
+  file.path(OUT_DIR, "gdscv1_canonical_lookup.csv")
 )
 
 # -------------------------------------------------------------------------
@@ -1752,20 +1745,20 @@ cat("Wrote samples:", nrow(sample_out_dt), "\n")
 # Treatment response using summarizeSensitivityProfiles
 # -------------------------------------------------------------------------
 
-extract_treatment_response_gdscv2(
-  pset_gdscv2 = gdscv2,
+extract_treatment_response_gdscv1(
+  pset_gdscv1 = gdscv1,
   canonical_lookup = canonical_lookup,
   out_path = file.path(OUT_DIR, "pre_clinical_treatment_response.csv")
 )
 
 # -------------------------------------------------------------------------
-# GDSCv2 molecular profiles
+# GDSCv1 molecular profiles
 # -------------------------------------------------------------------------
 
-rnaseq_se <- require_profile(gdscv2, RNA_SEQ_PROFILE_NAME)
-microarray_se <- require_profile(gdscv2, MICROARRAY_PROFILE_NAME)
-cnv_se <- require_profile(gdscv2, CNV_PROFILE_NAME)
-mutation_se <- require_profile(gdscv2, MUTATION_PROFILE_NAME)
+rnaseq_se <- require_profile(gdscv1, RNA_SEQ_PROFILE_NAME)
+microarray_se <- require_profile(gdscv1, MICROARRAY_PROFILE_NAME)
+cnv_se <- require_profile(gdscv1, CNV_PROFILE_NAME)
+mutation_se <- require_profile(gdscv1, MUTATION_PROFILE_NAME)
 
 # -------------------------------------------------------------------------
 # Gene mappings
@@ -1850,12 +1843,12 @@ write_gene_part(
     cnv_gene_map,
     mutation_gene_map
   ),
-  out_path = file.path(OUT_DIR, "pre_clinical_gene_gdscv2_part.csv")
+  out_path = file.path(OUT_DIR, "pre_clinical_gene_gdscv1_part.csv")
 )
 
 finalize_gene_table(
   gene_part_paths = c(
-    file.path(OUT_DIR, "pre_clinical_gene_gdscv2_part.csv")
+    file.path(OUT_DIR, "pre_clinical_gene_gdscv1_part.csv")
   ),
   out_dir = OUT_DIR
 )
@@ -1888,29 +1881,29 @@ mutation_column_map <- build_profile_column_map(
   profile_label = "mutation"
 )
 
-cat("Matched GDSCv2 RNA-seq columns:", nrow(rnaseq_column_map), "\n")
-cat("Matched GDSCv2 microarray columns:", nrow(microarray_column_map), "\n")
-cat("Matched GDSCv2 CNV columns:", nrow(cnv_column_map), "\n")
-cat("Matched GDSCv2 mutation columns:", nrow(mutation_column_map), "\n")
+cat("Matched GDSCv1 RNA-seq columns:", nrow(rnaseq_column_map), "\n")
+cat("Matched GDSCv1 microarray columns:", nrow(microarray_column_map), "\n")
+cat("Matched GDSCv1 CNV columns:", nrow(cnv_column_map), "\n")
+cat("Matched GDSCv1 mutation columns:", nrow(mutation_column_map), "\n")
 
 fwrite(
   rnaseq_column_map,
-  file.path(OUT_DIR, "gdscv2_rnaseq_column_map.csv")
+  file.path(OUT_DIR, "gdscv1_rnaseq_column_map.csv")
 )
 
 fwrite(
   microarray_column_map,
-  file.path(OUT_DIR, "gdscv2_microarray_column_map.csv")
+  file.path(OUT_DIR, "gdscv1_microarray_column_map.csv")
 )
 
 fwrite(
   cnv_column_map,
-  file.path(OUT_DIR, "gdscv2_cnv_column_map.csv")
+  file.path(OUT_DIR, "gdscv1_cnv_column_map.csv")
 )
 
 fwrite(
   mutation_column_map,
-  file.path(OUT_DIR, "gdscv2_mutation_column_map.csv")
+  file.path(OUT_DIR, "gdscv1_mutation_column_map.csv")
 )
 
 # -------------------------------------------------------------------------
@@ -1928,7 +1921,7 @@ write_long_assay_with_column_map(
   column_chunk_size = 2
 )
 
-cat("Wrote GDSCv2 RNA-seq assay CSV\n")
+cat("Wrote GDSCv1 RNA-seq assay CSV\n")
 
 # -------------------------------------------------------------------------
 # pre_clinical_microarray.csv
@@ -1945,7 +1938,7 @@ write_long_assay_with_column_map(
   column_chunk_size = 5
 )
 
-cat("Wrote GDSCv2 microarray assay CSV\n")
+cat("Wrote GDSCv1 microarray assay CSV\n")
 
 # -------------------------------------------------------------------------
 # pre_clinical_copy_number_variation.csv
@@ -1962,7 +1955,7 @@ write_long_assay_with_column_map(
   column_chunk_size = 5
 )
 
-cat("Wrote GDSCv2 CNV assay CSV\n")
+cat("Wrote GDSCv1 CNV assay CSV\n")
 
 # -------------------------------------------------------------------------
 # pre_clinical_mutation.csv
@@ -1979,16 +1972,16 @@ write_long_assay_with_column_map(
   column_chunk_size = 10
 )
 
-cat("Wrote GDSCv2 mutation assay CSV\n")
+cat("Wrote GDSCv1 mutation assay CSV\n")
 
 # -------------------------------------------------------------------------
 # Cleanup
 # -------------------------------------------------------------------------
 
-cat("\nFreeing GDSCv2 objects from memory\n")
+cat("\nFreeing GDSCv1 objects from memory\n")
 
 rm(
-  gdscv2,
+  gdscv1,
   selected_sample_dt,
   sheet_target_data,
   selection_data,
@@ -2009,4 +2002,4 @@ rm(
 
 gc(verbose = TRUE)
 
-cat("Finished extracting selected GDSCv2 preclinical CSVs into:", OUT_DIR, "\n")
+cat("Finished extracting selected GDSCv1 preclinical CSVs into:", OUT_DIR, "\n")

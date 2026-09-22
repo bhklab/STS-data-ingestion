@@ -2,6 +2,7 @@ suppressPackageStartupMessages({
   library(data.table)
   library(SummarizedExperiment)
   library(PharmacoGx)
+  library(miRBaseConverter)
 })
 
 # -------------------------------------------------------------------------
@@ -22,6 +23,10 @@ CCLE_2019_RDS_PATH <- "extraction/data/raw/preclinical/CCLE_2019.rds"
 CCLE_2015_RDS_PATH <- "extraction/data/raw/preclinical/CCLE_2015.rds"
 
 SHEET_CELL_LINE_QC_PATH <- "extraction/data/raw/preclinical/All_PSets_sarcoma_cell_line_QC.csv"
+
+# Local Ensembl BioMart gene mapping snapshot.
+# Expected columns: "Gene stable ID", "Gene name".
+BIOMART_GENE_PATH <- "extraction/data/raw/preclinical/biomart_genes.csv"
 
 OUT_DIR <- "extraction/data/proc/preclinical/CCLE"
 
@@ -1163,6 +1168,1184 @@ write_long_assay_with_column_map <- function(
   invisible(NULL)
 }
 
+
+# -------------------------------------------------------------------------
+# CCLE 2019 miRNA helpers
+# -------------------------------------------------------------------------
+
+normalize_gene_symbol <- function(x) {
+  x <- clean_na(x)
+  x <- toupper(gsub("[^A-Za-z0-9]", "", x))
+  x[x == ""] <- NA_character_
+  x
+}
+
+precursor_to_hgnc_symbol <- function(x) {
+  x <- clean_na(x)
+
+  out <- rep(NA_character_, length(x))
+  keep <- !is.na(x)
+
+  if (!any(keep)) {
+    return(out)
+  }
+
+  y <- tolower(x[keep])
+  y <- sub("^hsa-", "", y)
+
+  # Examples:
+  #   hsa-mir-190a  -> MIR190A
+  #   hsa-let-7b    -> MIRLET7B
+  #   hsa-let-7a-1  -> MIRLET7A1
+  y <- ifelse(
+    grepl("^let-", y),
+    paste0("mir", y),
+    y
+  )
+
+  y <- toupper(gsub("-", "", y))
+  out[keep] <- y
+  out
+}
+
+
+read_local_biomart_gene_mapping <- function(
+  path = BIOMART_GENE_PATH
+) {
+  if (!file.exists(path)) {
+    stop(
+      "Local BioMart gene mapping file not found at: ",
+      path,
+      ". Expected a CSV with columns 'Gene stable ID' and 'Gene name'."
+    )
+  }
+
+  biomart_dt <- fread(
+    path,
+    na.strings = c("", "NA", "N/A", "NULL")
+  )
+
+  required_cols <- c(
+    "Gene stable ID",
+    "Gene name"
+  )
+
+  missing_cols <- setdiff(
+    required_cols,
+    colnames(biomart_dt)
+  )
+
+  if (length(missing_cols) > 0) {
+    stop(
+      "Local BioMart CSV is missing required columns: ",
+      paste(missing_cols, collapse = ", "),
+      ". Found columns: ",
+      paste(colnames(biomart_dt), collapse = ", ")
+    )
+  }
+
+  biomart_dt <- biomart_dt[
+    ,
+    .(
+      gene_id = strip_ensembl_version(`Gene stable ID`),
+      gene_name = clean_na(`Gene name`)
+    )
+  ]
+
+  biomart_dt <- biomart_dt[
+    !is.na(gene_id) &
+      gene_id != "" &
+      grepl("^ENSG[0-9]+$", gene_id) &
+      !is.na(gene_name)
+  ]
+
+  biomart_dt[
+    ,
+    normalized_gene_symbol := normalize_gene_symbol(gene_name)
+  ]
+
+  biomart_dt <- biomart_dt[
+    !is.na(normalized_gene_symbol)
+  ]
+
+  unique(
+    biomart_dt,
+    by = c(
+      "gene_id",
+      "normalized_gene_symbol"
+    )
+  )
+}
+
+
+# -------------------------------------------------------------------------
+# Generic gene-symbol -> local BioMart mapping for feature-level profiles
+# -------------------------------------------------------------------------
+
+build_symbol_feature_mapping <- function(
+  se,
+  symbol_col,
+  feature_label,
+  profile_label,
+  audit_filename,
+  biomart_gene_path = BIOMART_GENE_PATH,
+  out_dir = OUT_DIR
+) {
+  rd <- as.data.table(
+    as.data.frame(rowData(se)),
+    keep.rownames = "feature_rowname"
+  )
+
+  if (!(symbol_col %in% colnames(rd))) {
+    stop(
+      "Required rowData column '",
+      symbol_col,
+      "' was not found for ",
+      profile_label,
+      ". Available rowData columns: ",
+      paste(colnames(rd), collapse = ", ")
+    )
+  }
+
+  feature_dt <- data.table(
+    feature_key = clean_na(rownames(se)),
+    gene_symbol = clean_na(rd[[symbol_col]])
+  )
+
+  if (nrow(feature_dt) != nrow(se)) {
+    stop(
+      "rowData/assay row count mismatch for ",
+      profile_label,
+      "."
+    )
+  }
+
+  feature_dt[
+    ,
+    normalized_gene_symbol := normalize_gene_symbol(gene_symbol)
+  ]
+
+  biomart_dt <- read_local_biomart_gene_mapping(
+    biomart_gene_path
+  )
+
+  mapping_rows <- merge(
+    feature_dt,
+    biomart_dt[
+      ,
+      .(
+        normalized_gene_symbol,
+        gene_id,
+        biomart_gene_name = gene_name
+      )
+    ],
+    by = "normalized_gene_symbol",
+    all.x = TRUE,
+    allow.cartesian = TRUE
+  )
+
+  feature_mapping <- mapping_rows[
+    ,
+    {
+      gene_ids <- sort(unique(clean_na(gene_id)))
+      gene_ids <- gene_ids[!is.na(gene_ids)]
+
+      biomart_names <- sort(unique(clean_na(biomart_gene_name)))
+      biomart_names <- biomart_names[!is.na(biomart_names)]
+
+      list(
+        gene_symbol = {
+          vals <- unique(clean_na(gene_symbol))
+          vals <- vals[!is.na(vals)]
+          if (length(vals) == 0) NA_character_ else vals[[1]]
+        },
+        n_ensembl_genes = length(gene_ids),
+        gene_id = if (length(gene_ids) == 1) {
+          gene_ids[[1]]
+        } else {
+          NA_character_
+        },
+        gene_name = if (
+          length(gene_ids) == 1 &&
+            length(biomart_names) >= 1
+        ) {
+          biomart_names[[1]]
+        } else {
+          NA_character_
+        },
+        candidate_ensembl_gene_ids = if (length(gene_ids) == 0) {
+          NA_character_
+        } else {
+          paste(gene_ids, collapse = "|")
+        }
+      )
+    },
+    by = feature_key
+  ]
+
+  # Preserve all features, including missing symbols and symbols that do not
+  # map to BioMart.
+  feature_mapping <- merge(
+    data.table(feature_key = clean_na(rownames(se))),
+    feature_mapping,
+    by = "feature_key",
+    all.x = TRUE
+  )
+
+  ambiguous_audit <- feature_mapping[
+    n_ensembl_genes > 1,
+    .(
+      feature_id = feature_key,
+      gene_symbol,
+      n_ensembl_genes,
+      candidate_ensembl_gene_ids
+    )
+  ]
+
+  setnames(
+    ambiguous_audit,
+    "feature_id",
+    feature_label
+  )
+
+  fwrite(
+    ambiguous_audit,
+    file.path(out_dir, audit_filename),
+    na = ""
+  )
+
+  cat(
+    profile_label,
+    " features with multiple Ensembl mappings:",
+    nrow(ambiguous_audit),
+    "\n"
+  )
+
+  mapping_audit_path <- file.path(
+    out_dir,
+    paste0(
+      "ccle_2019_",
+      gsub("[^A-Za-z0-9]+", "_", tolower(profile_label)),
+      "_feature_gene_mapping.csv"
+    )
+  )
+
+  mapping_audit <- copy(feature_mapping)
+  setnames(
+    mapping_audit,
+    "feature_key",
+    feature_label
+  )
+
+  fwrite(
+    mapping_audit,
+    mapping_audit_path,
+    na = ""
+  )
+
+  feature_mapping
+}
+
+
+write_symbol_annotated_assay <- function(
+  se,
+  feature_mapping,
+  column_map,
+  out_path,
+  feature_output_col,
+  symbol_output_col,
+  assay_name = "exprs",
+  column_chunk_size = 5
+) {
+  if (!(assay_name %in% assayNames(se))) {
+    assay_name <- assayNames(se)[1]
+  }
+
+  if (length(assay_name) == 0 || is.na(assay_name)) {
+    stop(
+      "No assay found for output: ",
+      out_path
+    )
+  }
+
+  cat(
+    "Using assay '",
+    assay_name,
+    "' for ",
+    basename(out_path),
+    "\n",
+    sep = ""
+  )
+
+  empty_output <- function() {
+    out <- data.table(
+      feature_key = character(),
+      sample_id = character(),
+      gene_symbol = character(),
+      gene_id = character(),
+      value = numeric()
+    )
+
+    setnames(
+      out,
+      c("feature_key", "gene_symbol"),
+      c(feature_output_col, symbol_output_col)
+    )
+
+    setcolorder(
+      out,
+      c(
+        feature_output_col,
+        "sample_id",
+        symbol_output_col,
+        "gene_id",
+        "value"
+      )
+    )
+
+    fwrite(
+      out,
+      out_path,
+      na = ""
+    )
+  }
+
+  if (nrow(column_map) == 0) {
+    empty_output()
+    return(invisible(NULL))
+  }
+
+  duplicate_samples <- column_map[
+    ,
+    .N,
+    by = sample_id
+  ][N > 1]
+
+  if (nrow(duplicate_samples) > 0) {
+    duplicate_path <- sub(
+      "\\.csv$",
+      "_duplicate_sample_columns.csv",
+      out_path
+    )
+
+    fwrite(
+      duplicate_samples,
+      duplicate_path
+    )
+
+    warning(
+      "Some source columns mapped to the same sample_id for ",
+      basename(out_path),
+      ". Keeping the first source column per sample_id. See: ",
+      duplicate_path
+    )
+  }
+
+  column_map <- unique(
+    column_map,
+    by = "sample_id"
+  )
+
+  column_map <- column_map[
+    colname %in% colnames(se)
+  ]
+
+  selected_cols <- column_map$colname
+
+  if (length(selected_cols) == 0) {
+    empty_output()
+    return(invisible(NULL))
+  }
+
+  if (file.exists(out_path)) {
+    file.remove(out_path)
+  }
+
+  first_write <- TRUE
+
+  for (start_idx in seq(
+    1,
+    length(selected_cols),
+    by = column_chunk_size
+  )) {
+    end_idx <- min(
+      start_idx + column_chunk_size - 1,
+      length(selected_cols)
+    )
+
+    chunk_cols <- selected_cols[
+      start_idx:end_idx
+    ]
+
+    cat(
+      "Writing ",
+      basename(out_path),
+      " columns ",
+      start_idx,
+      "-",
+      end_idx,
+      " of ",
+      length(selected_cols),
+      "\n",
+      sep = ""
+    )
+
+    chunk_map <- column_map[
+      colname %in% chunk_cols
+    ]
+
+    mat_chunk <- assay(
+      se,
+      assay_name
+    )[, chunk_cols, drop = FALSE]
+
+    dt <- as.data.table(
+      as.table(mat_chunk)
+    )
+
+    setnames(
+      dt,
+      c(
+        "feature_key",
+        "source_colname",
+        "value"
+      )
+    )
+
+    dt[
+      ,
+      feature_key := as.character(feature_key)
+    ]
+
+    dt[
+      ,
+      source_colname := as.character(source_colname)
+    ]
+
+    dt[
+      ,
+      value := suppressWarnings(as.numeric(value))
+    ]
+
+    dt <- merge(
+      dt,
+      chunk_map[
+        ,
+        .(
+          source_colname = colname,
+          sample_id
+        )
+      ],
+      by = "source_colname",
+      all.x = TRUE
+    )
+
+    dt <- merge(
+      dt,
+      feature_mapping[
+        ,
+        .(
+          feature_key,
+          gene_symbol,
+          gene_id
+        )
+      ],
+      by = "feature_key",
+      all.x = TRUE
+    )
+
+    # Do NOT require gene_symbol or gene_id. Measurements with no mapping or an
+    # ambiguous mapping remain in the output with gene_id = NA.
+    dt <- dt[
+      !is.na(feature_key) &
+        !is.na(sample_id) &
+        !is.na(value)
+    ]
+
+    dt[
+      ,
+      source_colname := NULL
+    ]
+
+    dt[
+      ,
+      gene_id := strip_ensembl_version(gene_id)
+    ]
+
+    # There should be a single assay value for each feature/sample pair.
+    # If the source unexpectedly contains duplicates, retain their mean rather
+    # than duplicating database observations.
+    dt <- dt[
+      ,
+      .(
+        gene_symbol = {
+          vals <- unique(clean_na(gene_symbol))
+          vals <- vals[!is.na(vals)]
+          if (length(vals) == 0) NA_character_ else vals[[1]]
+        },
+        gene_id = {
+          ids <- unique(clean_na(gene_id))
+          ids <- ids[!is.na(ids)]
+          if (length(ids) == 1) ids[[1]] else NA_character_
+        },
+        value = mean(value, na.rm = TRUE)
+      ),
+      by = .(
+        feature_key,
+        sample_id
+      )
+    ]
+
+    setnames(
+      dt,
+      c(
+        "feature_key",
+        "gene_symbol"
+      ),
+      c(
+        feature_output_col,
+        symbol_output_col
+      )
+    )
+
+    setcolorder(
+      dt,
+      c(
+        feature_output_col,
+        "sample_id",
+        symbol_output_col,
+        "gene_id",
+        "value"
+      )
+    )
+
+    fwrite(
+      dt,
+      out_path,
+      append = !first_write,
+      col.names = first_write,
+      na = ""
+    )
+
+    first_write <- FALSE
+
+    rm(
+      mat_chunk,
+      dt,
+      chunk_map
+    )
+
+    gc(verbose = FALSE)
+  }
+
+  invisible(NULL)
+}
+
+
+mapped_feature_genes_for_gene_table <- function(
+  feature_mapping
+) {
+  unique(
+    feature_mapping[
+      !is.na(gene_id) &
+        gene_id != "",
+      .(
+        feature_id = feature_key,
+        gene_id = strip_ensembl_version(gene_id),
+        gene_name = clean_na(gene_name)
+      )
+    ],
+    by = "gene_id"
+  )
+}
+
+
+build_ccle_mirna_mimat_mapping <- function(
+  mirna_se,
+  out_dir = OUT_DIR,
+  mirbase_version = "v22",
+  biomart_gene_path = BIOMART_GENE_PATH
+) {
+  mimat_ids <- clean_na(rownames(mirna_se))
+  mimat_ids <- unique(mimat_ids[!is.na(mimat_ids)])
+
+  if (length(mimat_ids) == 0) {
+    stop("CCLE 2019 miRNA profile has no usable MIMAT row names.")
+  }
+
+  if (any(!grepl("^MIMAT[0-9]+$", mimat_ids))) {
+    warning(
+      "Some CCLE 2019 miRNA row names are not MIMAT accessions. ",
+      "They will be retained in pre_clinical_mirna.csv but may not map."
+    )
+  }
+
+  cat(
+    "Building miRNA mapping for ",
+    length(mimat_ids),
+    " unique CCLE 2019 MIMAT features using miRBase ",
+    mirbase_version,
+    "\n",
+    sep = ""
+  )
+
+  # miRBaseConverter exposes the full human miRNA table. Each row is one
+  # precursor and contains up to two mature MIMAT accessions, which lets us
+  # detect mature miRNAs produced from multiple genomic precursors.
+  mirbase_tab <- as.data.table(
+    getMiRNATable(
+      version = mirbase_version,
+      species = "hsa"
+    )
+  )
+
+  required_mirbase_cols <- c(
+    "Precursor_Acc",
+    "Precursor",
+    "Mature1_Acc",
+    "Mature1",
+    "Mature2_Acc",
+    "Mature2"
+  )
+
+  missing_mirbase_cols <- setdiff(
+    required_mirbase_cols,
+    colnames(mirbase_tab)
+  )
+
+  if (length(missing_mirbase_cols) > 0) {
+    stop(
+      "Unexpected miRBaseConverter table structure. Missing columns: ",
+      paste(missing_mirbase_cols, collapse = ", ")
+    )
+  }
+
+  # First normalize every source MIMAT accession to its current mature
+  # miRBase v22 name. This is important for older/deprecated accessions that
+  # may no longer appear directly in the v22 mature-accession columns.
+  accession_to_name <- as.data.table(
+    miRNA_AccessionToName(
+      mimat_ids,
+      targetVersion = mirbase_version
+    )
+  )
+
+  required_accession_cols <- c("Accession", "TargetName")
+  missing_accession_cols <- setdiff(
+    required_accession_cols,
+    colnames(accession_to_name)
+  )
+
+  if (length(missing_accession_cols) > 0) {
+    stop(
+      "Unexpected miRNA_AccessionToName output. Missing columns: ",
+      paste(missing_accession_cols, collapse = ", ")
+    )
+  }
+
+  accession_to_name <- data.table(
+    id = clean_na(accession_to_name$Accession),
+    target_name_raw = clean_na(accession_to_name$TargetName)
+  )
+
+  # miRBaseConverter can occasionally return multiple possible current names
+  # separated by '&'. Expand them so every candidate can be checked.
+  accession_to_name <- accession_to_name[
+    ,
+    {
+      vals <- clean_na(unlist(strsplit(
+        ifelse(is.na(target_name_raw), "", target_name_raw),
+        "&",
+        fixed = TRUE
+      )))
+
+      vals <- unique(vals[!is.na(vals) & vals != ""])
+
+      if (length(vals) == 0) {
+        list(mature_name = NA_character_)
+      } else {
+        list(mature_name = vals)
+      }
+    },
+    by = id
+  ]
+
+  mature1_dt <- mirbase_tab[
+    !is.na(Mature1) & Mature1 != "",
+    .(
+      mature_name = clean_na(Mature1),
+      current_mimat_accession = clean_na(Mature1_Acc),
+      precursor_accession = clean_na(Precursor_Acc),
+      precursor_name = clean_na(Precursor)
+    )
+  ]
+
+  mature2_dt <- mirbase_tab[
+    !is.na(Mature2) & Mature2 != "",
+    .(
+      mature_name = clean_na(Mature2),
+      current_mimat_accession = clean_na(Mature2_Acc),
+      precursor_accession = clean_na(Precursor_Acc),
+      precursor_name = clean_na(Precursor)
+    )
+  ]
+
+  mirbase_mature_to_precursor <- unique(
+    rbindlist(
+      list(mature1_dt, mature2_dt),
+      fill = TRUE
+    ),
+    by = c(
+      "mature_name",
+      "current_mimat_accession",
+      "precursor_accession",
+      "precursor_name"
+    )
+  )
+
+  mapping_rows <- merge(
+    accession_to_name,
+    mirbase_mature_to_precursor,
+    by = "mature_name",
+    all.x = TRUE,
+    allow.cartesian = TRUE
+  )
+
+  # Ensure all source CCLE MIMAT IDs remain represented even if
+  # miRBaseConverter cannot normalize one of them.
+  mapping_rows <- merge(
+    data.table(id = mimat_ids),
+    mapping_rows,
+    by = "id",
+    all.x = TRUE,
+    allow.cartesian = TRUE
+  )
+
+  precursor_summary <- mapping_rows[
+    ,
+    {
+      precursor_names <- sort(unique(
+        clean_na(precursor_name)
+      ))
+      precursor_names <- precursor_names[!is.na(precursor_names)]
+
+      precursor_accessions <- sort(unique(
+        clean_na(precursor_accession)
+      ))
+      precursor_accessions <- precursor_accessions[
+        !is.na(precursor_accessions)
+      ]
+
+      mature_names <- sort(unique(
+        clean_na(mature_name)
+      ))
+      mature_names <- mature_names[!is.na(mature_names)]
+
+      current_mimat_accessions <- sort(unique(
+        clean_na(current_mimat_accession)
+      ))
+      current_mimat_accessions <- current_mimat_accessions[
+        !is.na(current_mimat_accessions)
+      ]
+
+      list(
+        mature_names = if (length(mature_names) == 0) {
+          NA_character_
+        } else {
+          paste(mature_names, collapse = "|")
+        },
+        current_mimat_accessions = if (
+          length(current_mimat_accessions) == 0
+        ) {
+          NA_character_
+        } else {
+          paste(current_mimat_accessions, collapse = "|")
+        },
+        n_precursors = length(precursor_names),
+        precursor_accessions = if (length(precursor_accessions) == 0) {
+          NA_character_
+        } else {
+          paste(precursor_accessions, collapse = "|")
+        },
+        precursor_names = if (length(precursor_names) == 0) {
+          NA_character_
+        } else {
+          paste(precursor_names, collapse = "|")
+        },
+        unique_precursor_name = if (length(precursor_names) == 1) {
+          precursor_names[[1]]
+        } else {
+          NA_character_
+        }
+      )
+    },
+    by = id
+  ]
+
+  multiple_precursor_audit <- precursor_summary[
+    n_precursors > 1,
+    .(
+      id,
+      mature_names,
+      current_mimat_accessions,
+      n_precursors,
+      precursor_accessions,
+      precursor_names
+    )
+  ]
+
+  fwrite(
+    multiple_precursor_audit,
+    file.path(
+      out_dir,
+      "ccle_2019_mirna_multiple_precursors_audit.csv"
+    ),
+    na = ""
+  )
+
+  cat(
+    "MIMAT accessions with multiple precursors:",
+    nrow(multiple_precursor_audit),
+    "\n"
+  )
+
+  # Only a MIMAT with exactly one precursor is eligible for an Ensembl gene
+  # assignment. Multiple-precursor MIMATs deliberately receive gene_id = NA.
+  precursor_summary[
+    ,
+    gene_symbol := precursor_to_hgnc_symbol(unique_precursor_name)
+  ]
+
+  unique_symbols <- unique(
+    precursor_summary[
+      n_precursors == 1 &
+        !is.na(gene_symbol),
+      gene_symbol
+    ]
+  )
+
+  ensembl_ref <- data.table(
+    gene_symbol = character(),
+    gene_id = character(),
+    gene_name = character()
+  )
+
+  if (length(unique_symbols) > 0) {
+    cat(
+      "Reading local BioMart gene mapping from: ",
+      biomart_gene_path,
+      "\n",
+      sep = ""
+    )
+
+    biomart_dt <- read_local_biomart_gene_mapping(
+      biomart_gene_path
+    )
+
+    requested_symbol_keys <- unique(
+      normalize_gene_symbol(unique_symbols)
+    )
+
+    biomart_dt <- biomart_dt[
+      normalized_gene_symbol %in% requested_symbol_keys
+    ]
+
+    ensembl_ref <- biomart_dt[
+      ,
+      .(
+        gene_symbol = normalized_gene_symbol,
+        gene_id,
+        gene_name
+      )
+    ]
+
+    ensembl_ref <- unique(
+      ensembl_ref,
+      by = c(
+        "gene_symbol",
+        "gene_id"
+      )
+    )
+
+    cat(
+      "Local BioMart candidate mappings found:",
+      nrow(ensembl_ref),
+      "\n"
+    )
+  }
+
+  precursor_summary[
+    ,
+    normalized_gene_symbol := normalize_gene_symbol(gene_symbol)
+  ]
+
+  mapping_with_ensembl <- merge(
+    precursor_summary,
+    ensembl_ref,
+    by.x = "normalized_gene_symbol",
+    by.y = "gene_symbol",
+    all.x = TRUE,
+    allow.cartesian = TRUE
+  )
+
+  # Detect symbols that unexpectedly map to >1 Ensembl gene. These are treated
+  # as ambiguous just like multiple-precursor MIMATs.
+  final_mapping <- mapping_with_ensembl[
+    ,
+    {
+      gene_ids <- sort(unique(clean_na(gene_id)))
+      gene_ids <- gene_ids[!is.na(gene_ids)]
+
+      gene_names <- sort(unique(clean_na(gene_name)))
+      gene_names <- gene_names[!is.na(gene_names)]
+
+      list(
+        mature_names = mature_names[[1]],
+        current_mimat_accessions = current_mimat_accessions[[1]],
+        n_precursors = n_precursors[[1]],
+        precursor_accessions = precursor_accessions[[1]],
+        precursor_names = precursor_names[[1]],
+        unique_precursor_name = unique_precursor_name[[1]],
+        gene_symbol = gene_symbol[[1]],
+        n_ensembl_genes = length(gene_ids),
+        gene_id = if (
+          n_precursors[[1]] == 1 &&
+            length(gene_ids) == 1
+        ) {
+          gene_ids[[1]]
+        } else {
+          NA_character_
+        },
+        gene_name = if (
+          n_precursors[[1]] == 1 &&
+            length(gene_ids) == 1 &&
+            length(gene_names) >= 1
+        ) {
+          gene_names[[1]]
+        } else {
+          NA_character_
+        },
+        candidate_ensembl_gene_ids = if (length(gene_ids) == 0) {
+          NA_character_
+        } else {
+          paste(gene_ids, collapse = "|")
+        }
+      )
+    },
+    by = id
+  ]
+
+  setorder(final_mapping, id)
+
+  fwrite(
+    final_mapping,
+    file.path(
+      out_dir,
+      "ccle_2019_mirna_mimat_to_ensembl_mapping.csv"
+    ),
+    na = ""
+  )
+
+  unique_precursor_unmapped <- final_mapping[
+    n_precursors == 1 &
+      is.na(gene_id),
+    .(
+      id,
+      mature_names,
+      current_mimat_accessions,
+      precursor_accessions,
+      precursor_names,
+      gene_symbol,
+      n_ensembl_genes,
+      candidate_ensembl_gene_ids
+    )
+  ]
+
+  fwrite(
+    unique_precursor_unmapped,
+    file.path(
+      out_dir,
+      "ccle_2019_mirna_unique_precursor_unmapped_ensembl_audit.csv"
+    ),
+    na = ""
+  )
+
+  cat(
+    "Unique-precursor MIMAT accessions without a unique Ensembl gene:",
+    nrow(unique_precursor_unmapped),
+    "\n"
+  )
+
+  final_mapping
+}
+
+write_mirna_assay_with_column_map <- function(
+  se,
+  mimat_mapping,
+  column_map,
+  out_path,
+  assay_name = "exprs",
+  column_chunk_size = 10
+) {
+  if (!(assay_name %in% assayNames(se))) {
+    assay_name <- assayNames(se)[1]
+  }
+
+  if (nrow(column_map) == 0) {
+    fwrite(
+      data.table(
+        id = character(),
+        sample_id = character(),
+        gene_id = character(),
+        value = numeric()
+      ),
+      out_path
+    )
+
+    return(invisible(NULL))
+  }
+
+  column_map <- unique(column_map, by = "sample_id")
+  column_map <- column_map[colname %in% colnames(se)]
+
+  selected_cols <- column_map$colname
+
+  if (length(selected_cols) == 0) {
+    fwrite(
+      data.table(
+        id = character(),
+        sample_id = character(),
+        gene_id = character(),
+        value = numeric()
+      ),
+      out_path
+    )
+
+    return(invisible(NULL))
+  }
+
+  if (file.exists(out_path)) {
+    file.remove(out_path)
+  }
+
+  first_write <- TRUE
+
+  for (start_idx in seq(
+    1,
+    length(selected_cols),
+    by = column_chunk_size
+  )) {
+    end_idx <- min(
+      start_idx + column_chunk_size - 1,
+      length(selected_cols)
+    )
+
+    chunk_cols <- selected_cols[start_idx:end_idx]
+
+    cat(
+      "Writing ",
+      basename(out_path),
+      " columns ",
+      start_idx,
+      "-",
+      end_idx,
+      " of ",
+      length(selected_cols),
+      "\n",
+      sep = ""
+    )
+
+    chunk_map <- column_map[colname %in% chunk_cols]
+
+    mat_chunk <- assay(
+      se,
+      assay_name
+    )[, chunk_cols, drop = FALSE]
+
+    dt <- as.data.table(as.table(mat_chunk))
+    setnames(
+      dt,
+      c("id", "source_colname", "value")
+    )
+
+    dt[, id := as.character(id)]
+    dt[, source_colname := as.character(source_colname)]
+    dt[, value := suppressWarnings(as.numeric(value))]
+
+    dt <- merge(
+      dt,
+      chunk_map[
+        ,
+        .(
+          source_colname = colname,
+          sample_id
+        )
+      ],
+      by = "source_colname",
+      all.x = TRUE
+    )
+
+    dt <- merge(
+      dt,
+      mimat_mapping[
+        ,
+        .(
+          id,
+          gene_id
+        )
+      ],
+      by = "id",
+      all.x = TRUE
+    )
+
+    dt <- dt[
+      !is.na(id) &
+        !is.na(sample_id) &
+        !is.na(value)
+    ]
+
+    # Preserve rows with gene_id = NA. A null gene_id explicitly means the
+    # mature MIMAT could not be assigned to one unique genomic precursor gene.
+    dt <- dt[
+      ,
+      .(
+        value = mean(value, na.rm = TRUE),
+        gene_id = {
+          ids <- unique(clean_na(gene_id))
+          ids <- ids[!is.na(ids)]
+          if (length(ids) == 1) ids[[1]] else NA_character_
+        }
+      ),
+      by = .(id, sample_id)
+    ]
+
+    setcolorder(
+      dt,
+      c(
+        "id",
+        "sample_id",
+        "gene_id",
+        "value"
+      )
+    )
+
+    fwrite(
+      dt,
+      out_path,
+      append = !first_write,
+      col.names = first_write,
+      na = ""
+    )
+
+    first_write <- FALSE
+
+    rm(mat_chunk, dt, chunk_map)
+    gc(verbose = FALSE)
+  }
+
+  invisible(NULL)
+}
+
 # -------------------------------------------------------------------------
 # Gene table helpers
 # -------------------------------------------------------------------------
@@ -1831,6 +3014,46 @@ gc(verbose = FALSE)
 rnaseq_se <- ccle_2019@molecularProfiles[["rnaseq.gene_tpm"]]
 cnv_se <- ccle_2019@molecularProfiles[["cnv.gene_log2"]]
 mutation_se <- ccle_2019@molecularProfiles[["mutation.gene_binary"]]
+mirna_se <- ccle_2019@molecularProfiles[["mirna.mimat_expression"]]
+
+rppa_se <- ccle_2019@molecularProfiles[["proteomics.rppa"]]
+methylation_tss_1kb_se <- ccle_2019@molecularProfiles[["methylation.tss_1kb"]]
+massspec_intensity_se <- ccle_2019@molecularProfiles[["proteomics.massspec_intensity"]]
+
+required_new_profiles <- c(
+  "proteomics.rppa",
+  "methylation.tss_1kb",
+  "proteomics.massspec_intensity"
+)
+
+missing_new_profiles <- required_new_profiles[
+  vapply(
+    required_new_profiles,
+    function(profile_name) {
+      is.null(ccle_2019@molecularProfiles[[profile_name]])
+    },
+    logical(1)
+  )
+]
+
+if (length(missing_new_profiles) > 0) {
+  stop(
+    "Missing required CCLE 2019 molecular profiles: ",
+    paste(missing_new_profiles, collapse = ", "),
+    ". Available profiles are: ",
+    paste(names(ccle_2019@molecularProfiles), collapse = ", ")
+  )
+}
+
+if (is.null(mirna_se)) {
+  stop(
+    "Could not find CCLE 2019 molecular profile named 'mirna.mimat_expression'. ",
+    "Available profiles are: ",
+    paste(names(ccle_2019@molecularProfiles), collapse = ", ")
+  )
+}
+
+cat("Selected CCLE 2019 miRNA profile: mirna.mimat_expression\n")
 
 rnaseq_gene_map <- make_gene_mapping(
   rnaseq_se,
@@ -1850,11 +3073,76 @@ mutation_gene_map <- make_gene_mapping(
   name_candidates = c("gene_symbol", "Symbol", "gene_name")
 )
 
+mirna_mimat_mapping <- build_ccle_mirna_mimat_mapping(
+  mirna_se = mirna_se,
+  out_dir = OUT_DIR,
+  mirbase_version = "v22",
+  biomart_gene_path = BIOMART_GENE_PATH
+)
+
+mirna_gene_map <- unique(
+  mirna_mimat_mapping[
+    !is.na(gene_id) & gene_id != "",
+    .(
+      feature_id = id,
+      gene_id = strip_ensembl_version(gene_id),
+      gene_name = clean_na(gene_name)
+    )
+  ],
+  by = "gene_id"
+)
+
+rppa_feature_mapping <- build_symbol_feature_mapping(
+  se = rppa_se,
+  symbol_col = "gene_symbol_primary",
+  feature_label = "feature_id",
+  profile_label = "rppa",
+  audit_filename = "ccle_2019_rppa_multiple_ensembl_mappings_audit.csv",
+  biomart_gene_path = BIOMART_GENE_PATH,
+  out_dir = OUT_DIR
+)
+
+methylation_tss_1kb_feature_mapping <- build_symbol_feature_mapping(
+  se = methylation_tss_1kb_se,
+  symbol_col = "gene_symbol",
+  feature_label = "locus_id",
+  profile_label = "methylation_tss_1kb",
+  audit_filename = "ccle_2019_methylation_tss_1kb_multiple_ensembl_mappings_audit.csv",
+  biomart_gene_path = BIOMART_GENE_PATH,
+  out_dir = OUT_DIR
+)
+
+massspec_intensity_feature_mapping <- build_symbol_feature_mapping(
+  se = massspec_intensity_se,
+  symbol_col = "gene_symbol_primary",
+  feature_label = "feature_protein_id",
+  profile_label = "massspec_intensity",
+  audit_filename = "ccle_2019_massspec_intensity_multiple_ensembl_mappings_audit.csv",
+  biomart_gene_path = BIOMART_GENE_PATH,
+  out_dir = OUT_DIR
+)
+
+rppa_gene_map <- mapped_feature_genes_for_gene_table(
+  rppa_feature_mapping
+)
+
+methylation_tss_1kb_gene_map <- mapped_feature_genes_for_gene_table(
+  methylation_tss_1kb_feature_mapping
+)
+
+massspec_intensity_gene_map <- mapped_feature_genes_for_gene_table(
+  massspec_intensity_feature_mapping
+)
+
 write_gene_part(
   gene_maps = list(
     rnaseq_gene_map,
     cnv_gene_map,
-    mutation_gene_map
+    mutation_gene_map,
+    mirna_gene_map,
+    rppa_gene_map,
+    methylation_tss_1kb_gene_map,
+    massspec_intensity_gene_map
   ),
   out_path = file.path(OUT_DIR, "pre_clinical_gene_2019_part.csv")
 )
@@ -1862,10 +3150,38 @@ write_gene_part(
 rnaseq_column_map <- build_profile_column_map(rnaseq_se, canonical_lookup)
 mutation_column_map <- build_profile_column_map(mutation_se, canonical_lookup)
 cnv_column_map <- build_profile_column_map(cnv_se, canonical_lookup)
+mirna_column_map <- build_profile_column_map(mirna_se, canonical_lookup)
+
+rppa_column_map <- build_profile_column_map(
+  rppa_se,
+  canonical_lookup
+)
+
+methylation_tss_1kb_column_map <- build_profile_column_map(
+  methylation_tss_1kb_se,
+  canonical_lookup
+)
+
+massspec_intensity_column_map <- build_profile_column_map(
+  massspec_intensity_se,
+  canonical_lookup
+)
 
 cat("Matched CCLE 2019 RNA-seq columns:", nrow(rnaseq_column_map), "\n")
 cat("Matched CCLE 2019 mutation columns:", nrow(mutation_column_map), "\n")
 cat("Matched CCLE 2019 CNV columns:", nrow(cnv_column_map), "\n")
+cat("Matched CCLE 2019 miRNA columns:", nrow(mirna_column_map), "\n")
+cat("Matched CCLE 2019 RPPA columns:", nrow(rppa_column_map), "\n")
+cat(
+  "Matched CCLE 2019 methylation.tss_1kb columns:",
+  nrow(methylation_tss_1kb_column_map),
+  "\n"
+)
+cat(
+  "Matched CCLE 2019 massspec intensity columns:",
+  nrow(massspec_intensity_column_map),
+  "\n"
+)
 
 fwrite(
   rnaseq_column_map,
@@ -1880,6 +3196,26 @@ fwrite(
 fwrite(
   cnv_column_map,
   file.path(OUT_DIR, "ccle_2019_cnv_column_map.csv")
+)
+
+fwrite(
+  mirna_column_map,
+  file.path(OUT_DIR, "ccle_2019_mirna_column_map.csv")
+)
+
+fwrite(
+  rppa_column_map,
+  file.path(OUT_DIR, "ccle_2019_rppa_column_map.csv")
+)
+
+fwrite(
+  methylation_tss_1kb_column_map,
+  file.path(OUT_DIR, "ccle_2019_methylation_tss_1kb_column_map.csv")
+)
+
+fwrite(
+  massspec_intensity_column_map,
+  file.path(OUT_DIR, "ccle_2019_massspec_intensity_column_map.csv")
 )
 
 write_long_assay_with_column_map(
@@ -1921,6 +3257,62 @@ write_long_assay_with_column_map(
 
 cat("Wrote CCLE 2019 CNV assay CSV\n")
 
+write_mirna_assay_with_column_map(
+  se = mirna_se,
+  mimat_mapping = mirna_mimat_mapping,
+  column_map = mirna_column_map,
+  out_path = file.path(OUT_DIR, "pre_clinical_mirna.csv"),
+  assay_name = "exprs",
+  column_chunk_size = 10
+)
+
+cat("Wrote CCLE 2019 miRNA assay CSV\n")
+
+write_symbol_annotated_assay(
+  se = rppa_se,
+  feature_mapping = rppa_feature_mapping,
+  column_map = rppa_column_map,
+  out_path = file.path(OUT_DIR, "pre_clinical_rppa.csv"),
+  feature_output_col = "feature_id",
+  symbol_output_col = "gene_symbol_primary",
+  assay_name = "exprs",
+  column_chunk_size = 10
+)
+
+cat("Wrote CCLE 2019 RPPA assay CSV\n")
+
+write_symbol_annotated_assay(
+  se = methylation_tss_1kb_se,
+  feature_mapping = methylation_tss_1kb_feature_mapping,
+  column_map = methylation_tss_1kb_column_map,
+  out_path = file.path(
+    OUT_DIR,
+    "pre_clinical_methylation_tss_1kb.csv"
+  ),
+  feature_output_col = "locus_id",
+  symbol_output_col = "gene_symbol",
+  assay_name = "exprs",
+  column_chunk_size = 5
+)
+
+cat("Wrote CCLE 2019 methylation.tss_1kb assay CSV\n")
+
+write_symbol_annotated_assay(
+  se = massspec_intensity_se,
+  feature_mapping = massspec_intensity_feature_mapping,
+  column_map = massspec_intensity_column_map,
+  out_path = file.path(
+    OUT_DIR,
+    "pre_clinical_massspec_intensity.csv"
+  ),
+  feature_output_col = "feature_protein_id",
+  symbol_output_col = "gene_symbol_primary",
+  assay_name = "exprs",
+  column_chunk_size = 5
+)
+
+cat("Wrote CCLE 2019 massspec intensity assay CSV\n")
+
 # -------------------------------------------------------------------------
 # Free CCLE 2019 memory before loading CCLE 2015
 # -------------------------------------------------------------------------
@@ -1936,12 +3328,28 @@ rm(
   rnaseq_se,
   cnv_se,
   mutation_se,
+  mirna_se,
+  rppa_se,
+  methylation_tss_1kb_se,
+  massspec_intensity_se,
   rnaseq_gene_map,
   cnv_gene_map,
   mutation_gene_map,
+  mirna_mimat_mapping,
+  mirna_gene_map,
+  rppa_feature_mapping,
+  methylation_tss_1kb_feature_mapping,
+  massspec_intensity_feature_mapping,
+  rppa_gene_map,
+  methylation_tss_1kb_gene_map,
+  massspec_intensity_gene_map,
   rnaseq_column_map,
   mutation_column_map,
-  cnv_column_map
+  cnv_column_map,
+  mirna_column_map,
+  rppa_column_map,
+  methylation_tss_1kb_column_map,
+  massspec_intensity_column_map
 )
 
 gc(verbose = TRUE)
