@@ -1244,11 +1244,19 @@ read_local_biomart_gene_mapping <- function(
     )
   }
 
+  # Preserve the original file order so "take the first BioMart match" is
+  # deterministic and auditable.
+  biomart_dt[
+    ,
+    biomart_row_order := .I
+  ]
+
   biomart_dt <- biomart_dt[
     ,
     .(
       gene_id = strip_ensembl_version(`Gene stable ID`),
-      gene_name = clean_na(`Gene name`)
+      gene_name = clean_na(`Gene name`),
+      biomart_row_order
     )
   ]
 
@@ -1268,13 +1276,22 @@ read_local_biomart_gene_mapping <- function(
     !is.na(normalized_gene_symbol)
   ]
 
-  unique(
+  # If the exact same symbol/Ensembl pair appears more than once, preserve only
+  # its first occurrence in biomart_genes.csv.
+  biomart_dt <- unique(
     biomart_dt,
     by = c(
       "gene_id",
       "normalized_gene_symbol"
     )
   )
+
+  setorder(
+    biomart_dt,
+    biomart_row_order
+  )
+
+  biomart_dt
 }
 
 
@@ -1336,69 +1353,124 @@ build_symbol_feature_mapping <- function(
       .(
         normalized_gene_symbol,
         gene_id,
-        biomart_gene_name = gene_name
+        biomart_gene_name = gene_name,
+        biomart_row_order
       )
     ],
     by = "normalized_gene_symbol",
     all.x = TRUE,
-    allow.cartesian = TRUE
+    allow.cartesian = TRUE,
+    sort = FALSE
   )
 
   feature_mapping <- mapping_rows[
     ,
     {
-      gene_ids <- sort(unique(clean_na(gene_id)))
-      gene_ids <- gene_ids[!is.na(gene_ids)]
+      valid_rows <- .SD[
+        !is.na(gene_id) &
+          gene_id != ""
+      ]
 
-      biomart_names <- sort(unique(clean_na(biomart_gene_name)))
-      biomart_names <- biomart_names[!is.na(biomart_names)]
+      if (nrow(valid_rows) > 0) {
+        setorder(
+          valid_rows,
+          biomart_row_order
+        )
+      }
+
+      # Preserve BioMart-file order rather than sorting the Ensembl IDs.
+      gene_ids <- unique(
+        clean_na(valid_rows$gene_id)
+      )
+      gene_ids <- gene_ids[
+        !is.na(gene_ids)
+      ]
+
+      selected_gene_id <- if (length(gene_ids) > 0) {
+        gene_ids[[1]]
+      } else {
+        NA_character_
+      }
+
+      selected_row <- if (!is.na(selected_gene_id)) {
+        valid_rows[
+          gene_id == selected_gene_id
+        ][1]
+      } else {
+        NULL
+      }
+
+      symbol_values <- unique(
+        clean_na(gene_symbol)
+      )
+      symbol_values <- symbol_values[
+        !is.na(symbol_values)
+      ]
 
       list(
-        gene_symbol = {
-          vals <- unique(clean_na(gene_symbol))
-          vals <- vals[!is.na(vals)]
-          if (length(vals) == 0) NA_character_ else vals[[1]]
+        gene_symbol = if (length(symbol_values) == 0) {
+          NA_character_
+        } else {
+          symbol_values[[1]]
         },
         n_ensembl_genes = length(gene_ids),
-        gene_id = if (length(gene_ids) == 1) {
-          gene_ids[[1]]
+        gene_id = selected_gene_id,
+        gene_name = if (
+          !is.null(selected_row) &&
+            nrow(selected_row) > 0
+        ) {
+          clean_na(selected_row$biomart_gene_name)[[1]]
         } else {
           NA_character_
         },
-        gene_name = if (
-          length(gene_ids) == 1 &&
-            length(biomart_names) >= 1
+        selected_biomart_row_order = if (
+          !is.null(selected_row) &&
+            nrow(selected_row) > 0
         ) {
-          biomart_names[[1]]
+          as.integer(selected_row$biomart_row_order[[1]])
         } else {
-          NA_character_
+          NA_integer_
         },
         candidate_ensembl_gene_ids = if (length(gene_ids) == 0) {
           NA_character_
         } else {
           paste(gene_ids, collapse = "|")
+        },
+        selection_rule = if (length(gene_ids) == 0) {
+          "no_biomart_match"
+        } else if (length(gene_ids) == 1) {
+          "single_biomart_match"
+        } else {
+          "first_biomart_match_selected"
         }
       )
     },
     by = feature_key
   ]
 
-  # Preserve all features, including missing symbols and symbols that do not
-  # map to BioMart.
+  # Preserve all source features even when a gene symbol has no BioMart match.
   feature_mapping <- merge(
-    data.table(feature_key = clean_na(rownames(se))),
+    data.table(
+      feature_key = clean_na(rownames(se))
+    ),
     feature_mapping,
     by = "feature_key",
-    all.x = TRUE
+    all.x = TRUE,
+    sort = FALSE
   )
 
+  # Audit every symbol where BioMart offered >1 distinct Ensembl gene.
+  # gene_id is still populated in the final output with the first BioMart match.
   ambiguous_audit <- feature_mapping[
     n_ensembl_genes > 1,
     .(
       feature_id = feature_key,
       gene_symbol,
       n_ensembl_genes,
-      candidate_ensembl_gene_ids
+      candidate_ensembl_gene_ids,
+      selected_gene_id = gene_id,
+      selected_biomart_row_order,
+      selection_rule
     )
   ]
 
@@ -1410,27 +1482,39 @@ build_symbol_feature_mapping <- function(
 
   fwrite(
     ambiguous_audit,
-    file.path(out_dir, audit_filename),
+    file.path(
+      out_dir,
+      audit_filename
+    ),
     na = ""
   )
 
   cat(
     profile_label,
-    " features with multiple Ensembl mappings:",
+    " features with multiple Ensembl mappings (first BioMart match selected):",
     nrow(ambiguous_audit),
     "\n"
   )
 
+  # Full feature-level mapping audit, including unique, missing, and multi-match
+  # mappings.
   mapping_audit_path <- file.path(
     out_dir,
     paste0(
       "ccle_2019_",
-      gsub("[^A-Za-z0-9]+", "_", tolower(profile_label)),
+      gsub(
+        "[^A-Za-z0-9]+",
+        "_",
+        tolower(profile_label)
+      ),
       "_feature_gene_mapping.csv"
     )
   )
 
-  mapping_audit <- copy(feature_mapping)
+  mapping_audit <- copy(
+    feature_mapping
+  )
+
   setnames(
     mapping_audit,
     "feature_key",
@@ -1654,8 +1738,9 @@ write_symbol_annotated_assay <- function(
       all.x = TRUE
     )
 
-    # Do NOT require gene_symbol or gene_id. Measurements with no mapping or an
-    # ambiguous mapping remain in the output with gene_id = NA.
+    # Do NOT require gene_symbol or gene_id. Measurements with no BioMart
+    # mapping remain in the output with gene_id = NA. When BioMart has multiple
+    # Ensembl mappings, feature_mapping already contains the first match.
     dt <- dt[
       !is.na(feature_key) &
         !is.na(sample_id) &
@@ -1766,11 +1851,20 @@ build_ccle_mirna_mimat_mapping <- function(
   mirbase_version = "v22",
   biomart_gene_path = BIOMART_GENE_PATH
 ) {
-  mimat_ids <- clean_na(rownames(mirna_se))
-  mimat_ids <- unique(mimat_ids[!is.na(mimat_ids)])
+  mimat_ids <- clean_na(
+    rownames(mirna_se)
+  )
+
+  mimat_ids <- unique(
+    mimat_ids[
+      !is.na(mimat_ids)
+    ]
+  )
 
   if (length(mimat_ids) == 0) {
-    stop("CCLE 2019 miRNA profile has no usable MIMAT row names.")
+    stop(
+      "CCLE 2019 miRNA profile has no usable MIMAT row names."
+    )
   }
 
   if (any(!grepl("^MIMAT[0-9]+$", mimat_ids))) {
@@ -1789,15 +1883,19 @@ build_ccle_mirna_mimat_mapping <- function(
     sep = ""
   )
 
-  # miRBaseConverter exposes the full human miRNA table. Each row is one
-  # precursor and contains up to two mature MIMAT accessions, which lets us
-  # detect mature miRNAs produced from multiple genomic precursors.
+  # miRBaseConverter exposes one row per precursor. Preserve that row order so
+  # the "first precursor that maps" rule is deterministic.
   mirbase_tab <- as.data.table(
     getMiRNATable(
       version = mirbase_version,
       species = "hsa"
     )
   )
+
+  mirbase_tab[
+    ,
+    mirbase_row_order := .I
+  ]
 
   required_mirbase_cols <- c(
     "Precursor_Acc",
@@ -1816,13 +1914,15 @@ build_ccle_mirna_mimat_mapping <- function(
   if (length(missing_mirbase_cols) > 0) {
     stop(
       "Unexpected miRBaseConverter table structure. Missing columns: ",
-      paste(missing_mirbase_cols, collapse = ", ")
+      paste(
+        missing_mirbase_cols,
+        collapse = ", "
+      )
     )
   }
 
-  # First normalize every source MIMAT accession to its current mature
-  # miRBase v22 name. This is important for older/deprecated accessions that
-  # may no longer appear directly in the v22 mature-accession columns.
+  # Normalize the source MIMAT accession to the mature name used in the target
+  # miRBase version.
   accession_to_name <- as.data.table(
     miRNA_AccessionToName(
       mimat_ids,
@@ -1830,7 +1930,11 @@ build_ccle_mirna_mimat_mapping <- function(
     )
   )
 
-  required_accession_cols <- c("Accession", "TargetName")
+  required_accession_cols <- c(
+    "Accession",
+    "TargetName"
+  )
+
   missing_accession_cols <- setdiff(
     required_accession_cols,
     colnames(accession_to_name)
@@ -1839,67 +1943,99 @@ build_ccle_mirna_mimat_mapping <- function(
   if (length(missing_accession_cols) > 0) {
     stop(
       "Unexpected miRNA_AccessionToName output. Missing columns: ",
-      paste(missing_accession_cols, collapse = ", ")
+      paste(
+        missing_accession_cols,
+        collapse = ", "
+      )
     )
   }
 
   accession_to_name <- data.table(
-    id = clean_na(accession_to_name$Accession),
-    target_name_raw = clean_na(accession_to_name$TargetName)
+    id = clean_na(
+      accession_to_name$Accession
+    ),
+    target_name_raw = clean_na(
+      accession_to_name$TargetName
+    )
   )
 
-  # miRBaseConverter can occasionally return multiple possible current names
-  # separated by '&'. Expand them so every candidate can be checked.
+  # miRBaseConverter can return multiple possible current names separated by
+  # '&'. Expand each one so every precursor relationship is considered.
   accession_to_name <- accession_to_name[
     ,
     {
-      vals <- clean_na(unlist(strsplit(
-        ifelse(is.na(target_name_raw), "", target_name_raw),
-        "&",
-        fixed = TRUE
-      )))
+      vals <- clean_na(
+        unlist(
+          strsplit(
+            ifelse(
+              is.na(target_name_raw),
+              "",
+              target_name_raw
+            ),
+            "&",
+            fixed = TRUE
+          )
+        )
+      )
 
-      vals <- unique(vals[!is.na(vals) & vals != ""])
+      vals <- unique(
+        vals[
+          !is.na(vals) &
+            vals != ""
+        ]
+      )
 
       if (length(vals) == 0) {
-        list(mature_name = NA_character_)
+        list(
+          mature_name = NA_character_
+        )
       } else {
-        list(mature_name = vals)
+        list(
+          mature_name = vals
+        )
       }
     },
     by = id
   ]
 
   mature1_dt <- mirbase_tab[
-    !is.na(Mature1) & Mature1 != "",
+    !is.na(Mature1) &
+      Mature1 != "",
     .(
       mature_name = clean_na(Mature1),
       current_mimat_accession = clean_na(Mature1_Acc),
       precursor_accession = clean_na(Precursor_Acc),
-      precursor_name = clean_na(Precursor)
+      precursor_name = clean_na(Precursor),
+      precursor_order = mirbase_row_order
     )
   ]
 
   mature2_dt <- mirbase_tab[
-    !is.na(Mature2) & Mature2 != "",
+    !is.na(Mature2) &
+      Mature2 != "",
     .(
       mature_name = clean_na(Mature2),
       current_mimat_accession = clean_na(Mature2_Acc),
       precursor_accession = clean_na(Precursor_Acc),
-      precursor_name = clean_na(Precursor)
+      precursor_name = clean_na(Precursor),
+      precursor_order = mirbase_row_order
     )
   ]
 
   mirbase_mature_to_precursor <- unique(
     rbindlist(
-      list(mature1_dt, mature2_dt),
+      list(
+        mature1_dt,
+        mature2_dt
+      ),
       fill = TRUE
     ),
     by = c(
       "mature_name",
       "current_mimat_accession",
       "precursor_accession",
-      "precursor_name"
+      "precursor_name",
+      "precursor_order"
     )
   )
 
@@ -1908,42 +2044,51 @@ build_ccle_mirna_mimat_mapping <- function(
     mirbase_mature_to_precursor,
     by = "mature_name",
     all.x = TRUE,
-    allow.cartesian = TRUE
+    allow.cartesian = TRUE,
+    sort = FALSE
   )
 
-  # Ensure all source CCLE MIMAT IDs remain represented even if
-  # miRBaseConverter cannot normalize one of them.
+  # Keep all source MIMAT accessions represented even when miRBaseConverter
+  # cannot resolve a mature name or precursor.
   mapping_rows <- merge(
-    data.table(id = mimat_ids),
+    data.table(
+      id = mimat_ids
+    ),
     mapping_rows,
     by = "id",
     all.x = TRUE,
-    allow.cartesian = TRUE
+    allow.cartesian = TRUE,
+    sort = FALSE
   )
 
+  # Overall miRNA/precursor summary used by the final mapping and audits.
   precursor_summary <- mapping_rows[
     ,
     {
-      precursor_names <- sort(unique(
+      precursor_names <- unique(
         clean_na(precursor_name)
-      ))
-      precursor_names <- precursor_names[!is.na(precursor_names)]
+      )
+      precursor_names <- precursor_names[
+        !is.na(precursor_names)
+      ]
 
-      precursor_accessions <- sort(unique(
+      precursor_accessions <- unique(
         clean_na(precursor_accession)
-      ))
+      )
       precursor_accessions <- precursor_accessions[
         !is.na(precursor_accessions)
       ]
 
-      mature_names <- sort(unique(
+      mature_names <- unique(
         clean_na(mature_name)
-      ))
-      mature_names <- mature_names[!is.na(mature_names)]
+      )
+      mature_names <- mature_names[
+        !is.na(mature_names)
+      ]
 
-      current_mimat_accessions <- sort(unique(
+      current_mimat_accessions <- unique(
         clean_na(current_mimat_accession)
-      ))
+      )
       current_mimat_accessions <- current_mimat_accessions[
         !is.na(current_mimat_accessions)
       ]
@@ -1952,27 +2097,47 @@ build_ccle_mirna_mimat_mapping <- function(
         mature_names = if (length(mature_names) == 0) {
           NA_character_
         } else {
-          paste(mature_names, collapse = "|")
+          paste(
+            mature_names,
+            collapse = "|"
+          )
         },
         current_mimat_accessions = if (
           length(current_mimat_accessions) == 0
         ) {
           NA_character_
         } else {
-          paste(current_mimat_accessions, collapse = "|")
+          paste(
+            current_mimat_accessions,
+            collapse = "|"
+          )
         },
-        n_precursors = length(precursor_names),
-        precursor_accessions = if (length(precursor_accessions) == 0) {
+        n_precursors = length(
+          precursor_names
+        ),
+        precursor_accessions = if (
+          length(precursor_accessions) == 0
+        ) {
           NA_character_
         } else {
-          paste(precursor_accessions, collapse = "|")
+          paste(
+            precursor_accessions,
+            collapse = "|"
+          )
         },
-        precursor_names = if (length(precursor_names) == 0) {
+        precursor_names = if (
+          length(precursor_names) == 0
+        ) {
           NA_character_
         } else {
-          paste(precursor_names, collapse = "|")
+          paste(
+            precursor_names,
+            collapse = "|"
+          )
         },
-        unique_precursor_name = if (length(precursor_names) == 1) {
+        unique_precursor_name = if (
+          length(precursor_names) == 1
+        ) {
           precursor_names[[1]]
         } else {
           NA_character_
@@ -1982,7 +2147,305 @@ build_ccle_mirna_mimat_mapping <- function(
     by = id
   ]
 
-  multiple_precursor_audit <- precursor_summary[
+  # Build one row per distinct precursor for each MIMAT. If the same precursor
+  # appears through multiple mature-name records, retain its earliest miRBase
+  # row order.
+  precursor_candidates <- mapping_rows[
+    !is.na(precursor_name),
+    .(
+      precursor_order = {
+        orders <- precursor_order[
+          !is.na(precursor_order)
+        ]
+
+        if (length(orders) == 0) {
+          .Machine$integer.max
+        } else {
+          min(orders)
+        }
+      }
+    ),
+    by = .(
+      id,
+      precursor_accession,
+      precursor_name
+    )
+  ]
+
+  precursor_candidates[
+    ,
+    gene_symbol := precursor_to_hgnc_symbol(
+      precursor_name
+    )
+  ]
+
+  precursor_candidates[
+    ,
+    normalized_gene_symbol := normalize_gene_symbol(
+      gene_symbol
+    )
+  ]
+
+  biomart_dt <- read_local_biomart_gene_mapping(
+    biomart_gene_path
+  )
+
+  precursor_biomart_rows <- merge(
+    precursor_candidates,
+    biomart_dt[
+      ,
+      .(
+        normalized_gene_symbol,
+        gene_id,
+        biomart_gene_name = gene_name,
+        biomart_row_order
+      )
+    ],
+    by = "normalized_gene_symbol",
+    all.x = TRUE,
+    allow.cartesian = TRUE,
+    sort = FALSE
+  )
+
+  # Resolve each precursor independently. If a precursor's symbol has multiple
+  # Ensembl IDs in BioMart, select the first one by biomart_genes.csv row order.
+  precursor_resolution <- precursor_biomart_rows[
+    ,
+    {
+      valid_rows <- .SD[
+        !is.na(gene_id) &
+          gene_id != ""
+      ]
+
+      if (nrow(valid_rows) > 0) {
+        setorder(
+          valid_rows,
+          biomart_row_order
+        )
+      }
+
+      candidate_ids <- unique(
+        clean_na(valid_rows$gene_id)
+      )
+
+      candidate_ids <- candidate_ids[
+        !is.na(candidate_ids)
+      ]
+
+      chosen_gene_id <- if (
+        length(candidate_ids) > 0
+      ) {
+        candidate_ids[[1]]
+      } else {
+        NA_character_
+      }
+
+      chosen_row <- if (
+        !is.na(chosen_gene_id)
+      ) {
+        valid_rows[
+          gene_id == chosen_gene_id
+        ][1]
+      } else {
+        NULL
+      }
+
+      list(
+        n_ensembl_genes = length(
+          candidate_ids
+        ),
+        candidate_ensembl_gene_ids = if (
+          length(candidate_ids) == 0
+        ) {
+          NA_character_
+        } else {
+          paste(
+            candidate_ids,
+            collapse = "|"
+          )
+        },
+        chosen_gene_id = chosen_gene_id,
+        chosen_gene_name = if (
+          !is.null(chosen_row) &&
+            nrow(chosen_row) > 0
+        ) {
+          clean_na(
+            chosen_row$biomart_gene_name
+          )[[1]]
+        } else {
+          NA_character_
+        },
+        selected_biomart_row_order = if (
+          !is.null(chosen_row) &&
+            nrow(chosen_row) > 0
+        ) {
+          as.integer(
+            chosen_row$biomart_row_order[[1]]
+          )
+        } else {
+          NA_integer_
+        },
+        precursor_selection_rule = if (
+          length(candidate_ids) == 0
+        ) {
+          "no_biomart_match"
+        } else if (
+          length(candidate_ids) == 1
+        ) {
+          "single_biomart_match"
+        } else {
+          "first_biomart_match_selected"
+        }
+      )
+    },
+    by = .(
+      id,
+      precursor_order,
+      precursor_accession,
+      precursor_name,
+      gene_symbol
+    )
+  ]
+
+  # For each MIMAT, walk through precursors in miRBase order and select the
+  # first precursor that has any valid Ensembl gene mapping.
+  mapped_precursors <- precursor_resolution[
+    !is.na(chosen_gene_id)
+  ]
+
+  if (nrow(mapped_precursors) > 0) {
+    setorder(
+      mapped_precursors,
+      id,
+      precursor_order,
+      selected_biomart_row_order
+    )
+  }
+
+  selected_precursor <- mapped_precursors[
+    ,
+    .SD[1],
+    by = id
+  ]
+
+  selected_precursor <- selected_precursor[
+    ,
+    .(
+      id,
+      selected_precursor_order = precursor_order,
+      selected_precursor_accession = precursor_accession,
+      selected_precursor_name = precursor_name,
+      gene_symbol,
+      n_ensembl_genes,
+      candidate_ensembl_gene_ids,
+      gene_id = chosen_gene_id,
+      gene_name = chosen_gene_name,
+      selected_biomart_row_order,
+      precursor_selection_rule
+    )
+  ]
+
+  # Capture every precursor and every candidate mapping in a compact audit
+  # string, while keeping a separate count of how many precursors actually
+  # produced an Ensembl mapping.
+  precursor_mapping_summary <- precursor_resolution[
+    ,
+    .(
+      n_precursors_with_ensembl = sum(
+        !is.na(chosen_gene_id)
+      ),
+      precursor_mapping_details = paste(
+        paste0(
+          ifelse(
+            is.na(precursor_name),
+            "<no_precursor>",
+            precursor_name
+          ),
+          " [",
+          ifelse(
+            is.na(gene_symbol),
+            "<no_symbol>",
+            gene_symbol
+          ),
+          "] => ",
+          ifelse(
+            is.na(candidate_ensembl_gene_ids),
+            "<no_ensembl_match>",
+            candidate_ensembl_gene_ids
+          )
+        ),
+        collapse = " ; "
+      )
+    ),
+    by = id
+  ]
+
+  final_mapping <- merge(
+    precursor_summary,
+    selected_precursor,
+    by = "id",
+    all.x = TRUE,
+    sort = FALSE
+  )
+
+  final_mapping <- merge(
+    final_mapping,
+    precursor_mapping_summary,
+    by = "id",
+    all.x = TRUE,
+    sort = FALSE
+  )
+
+  final_mapping[
+    is.na(n_precursors_with_ensembl),
+    n_precursors_with_ensembl := 0L
+  ]
+
+  final_mapping[
+    ,
+    selection_rule := fifelse(
+      n_precursors == 0,
+      "no_precursor",
+      fifelse(
+        is.na(gene_id),
+        "no_precursor_mapped_to_ensembl",
+        fifelse(
+          n_precursors > 1 &
+            n_ensembl_genes > 1,
+          "first_mapped_precursor_and_first_biomart_match_selected",
+          fifelse(
+            n_precursors > 1,
+            "first_precursor_with_ensembl_selected",
+            fifelse(
+              n_ensembl_genes > 1,
+              "first_biomart_match_selected",
+              "unique_precursor_unique_ensembl"
+            )
+          )
+        )
+      )
+    )
+  ]
+
+  setorder(
+    final_mapping,
+    id
+  )
+
+  # Comprehensive final MIMAT -> precursor -> Ensembl mapping record.
+  fwrite(
+    final_mapping,
+    file.path(
+      out_dir,
+      "ccle_2019_mirna_mimat_to_ensembl_mapping.csv"
+    ),
+    na = ""
+  )
+
+  # Audit multiple precursor cases. Unlike the previous behavior, these can now
+  # receive a gene_id if at least one precursor maps. The selected precursor and
+  # all precursor candidates are recorded.
+  multiple_precursor_audit <- final_mapping[
     n_precursors > 1,
     .(
       id,
@@ -1990,7 +2453,19 @@ build_ccle_mirna_mimat_mapping <- function(
       current_mimat_accessions,
       n_precursors,
       precursor_accessions,
-      precursor_names
+      precursor_names,
+      n_precursors_with_ensembl,
+      precursor_mapping_details,
+      selected_precursor_order,
+      selected_precursor_accession,
+      selected_precursor_name,
+      selected_gene_symbol = gene_symbol,
+      selected_gene_id = gene_id,
+      selected_gene_name = gene_name,
+      selected_precursor_candidate_ensembl_gene_ids =
+        candidate_ensembl_gene_ids,
+      selected_biomart_row_order,
+      selection_rule
     )
   ]
 
@@ -2003,149 +2478,68 @@ build_ccle_mirna_mimat_mapping <- function(
     na = ""
   )
 
-  cat(
-    "MIMAT accessions with multiple precursors:",
-    nrow(multiple_precursor_audit),
-    "\n"
-  )
-
-  # Only a MIMAT with exactly one precursor is eligible for an Ensembl gene
-  # assignment. Multiple-precursor MIMATs deliberately receive gene_id = NA.
-  precursor_summary[
-    ,
-    gene_symbol := precursor_to_hgnc_symbol(unique_precursor_name)
+  # Audit precursor gene symbols that themselves match multiple Ensembl genes.
+  # The first BioMart occurrence is selected, but all candidates are retained.
+  multiple_ensembl_audit <- precursor_resolution[
+    n_ensembl_genes > 1,
+    .(
+      id,
+      precursor_order,
+      precursor_accession,
+      precursor_name,
+      gene_symbol,
+      n_ensembl_genes,
+      candidate_ensembl_gene_ids,
+      selected_gene_id = chosen_gene_id,
+      selected_gene_name = chosen_gene_name,
+      selected_biomart_row_order,
+      selection_rule = precursor_selection_rule
+    )
   ]
-
-  unique_symbols <- unique(
-    precursor_summary[
-      n_precursors == 1 &
-        !is.na(gene_symbol),
-      gene_symbol
-    ]
-  )
-
-  ensembl_ref <- data.table(
-    gene_symbol = character(),
-    gene_id = character(),
-    gene_name = character()
-  )
-
-  if (length(unique_symbols) > 0) {
-    cat(
-      "Reading local BioMart gene mapping from: ",
-      biomart_gene_path,
-      "\n",
-      sep = ""
-    )
-
-    biomart_dt <- read_local_biomart_gene_mapping(
-      biomart_gene_path
-    )
-
-    requested_symbol_keys <- unique(
-      normalize_gene_symbol(unique_symbols)
-    )
-
-    biomart_dt <- biomart_dt[
-      normalized_gene_symbol %in% requested_symbol_keys
-    ]
-
-    ensembl_ref <- biomart_dt[
-      ,
-      .(
-        gene_symbol = normalized_gene_symbol,
-        gene_id,
-        gene_name
-      )
-    ]
-
-    ensembl_ref <- unique(
-      ensembl_ref,
-      by = c(
-        "gene_symbol",
-        "gene_id"
-      )
-    )
-
-    cat(
-      "Local BioMart candidate mappings found:",
-      nrow(ensembl_ref),
-      "\n"
-    )
-  }
-
-  precursor_summary[
-    ,
-    normalized_gene_symbol := normalize_gene_symbol(gene_symbol)
-  ]
-
-  mapping_with_ensembl <- merge(
-    precursor_summary,
-    ensembl_ref,
-    by.x = "normalized_gene_symbol",
-    by.y = "gene_symbol",
-    all.x = TRUE,
-    allow.cartesian = TRUE
-  )
-
-  # Detect symbols that unexpectedly map to >1 Ensembl gene. These are treated
-  # as ambiguous just like multiple-precursor MIMATs.
-  final_mapping <- mapping_with_ensembl[
-    ,
-    {
-      gene_ids <- sort(unique(clean_na(gene_id)))
-      gene_ids <- gene_ids[!is.na(gene_ids)]
-
-      gene_names <- sort(unique(clean_na(gene_name)))
-      gene_names <- gene_names[!is.na(gene_names)]
-
-      list(
-        mature_names = mature_names[[1]],
-        current_mimat_accessions = current_mimat_accessions[[1]],
-        n_precursors = n_precursors[[1]],
-        precursor_accessions = precursor_accessions[[1]],
-        precursor_names = precursor_names[[1]],
-        unique_precursor_name = unique_precursor_name[[1]],
-        gene_symbol = gene_symbol[[1]],
-        n_ensembl_genes = length(gene_ids),
-        gene_id = if (
-          n_precursors[[1]] == 1 &&
-            length(gene_ids) == 1
-        ) {
-          gene_ids[[1]]
-        } else {
-          NA_character_
-        },
-        gene_name = if (
-          n_precursors[[1]] == 1 &&
-            length(gene_ids) == 1 &&
-            length(gene_names) >= 1
-        ) {
-          gene_names[[1]]
-        } else {
-          NA_character_
-        },
-        candidate_ensembl_gene_ids = if (length(gene_ids) == 0) {
-          NA_character_
-        } else {
-          paste(gene_ids, collapse = "|")
-        }
-      )
-    },
-    by = id
-  ]
-
-  setorder(final_mapping, id)
 
   fwrite(
-    final_mapping,
+    multiple_ensembl_audit,
     file.path(
       out_dir,
-      "ccle_2019_mirna_mimat_to_ensembl_mapping.csv"
+      "ccle_2019_mirna_multiple_ensembl_mappings_audit.csv"
     ),
     na = ""
   )
 
+  # Combined audit of every MIMAT where some fallback/first-match selection was
+  # required.
+  mapping_selection_audit <- final_mapping[
+    n_precursors > 1 |
+      n_ensembl_genes > 1,
+    .(
+      id,
+      mature_names,
+      current_mimat_accessions,
+      n_precursors,
+      n_precursors_with_ensembl,
+      precursor_mapping_details,
+      selected_precursor_accession,
+      selected_precursor_name,
+      selected_gene_symbol = gene_symbol,
+      selected_gene_id = gene_id,
+      selected_gene_name = gene_name,
+      selected_precursor_candidate_ensembl_gene_ids =
+        candidate_ensembl_gene_ids,
+      selected_biomart_row_order,
+      selection_rule
+    )
+  ]
+
+  fwrite(
+    mapping_selection_audit,
+    file.path(
+      out_dir,
+      "ccle_2019_mirna_mapping_selection_audit.csv"
+    ),
+    na = ""
+  )
+
+  # Preserve the existing unique-precursor unmapped audit filename.
   unique_precursor_unmapped <- final_mapping[
     n_precursors == 1 &
       is.na(gene_id),
@@ -2155,9 +2549,8 @@ build_ccle_mirna_mimat_mapping <- function(
       current_mimat_accessions,
       precursor_accessions,
       precursor_names,
-      gene_symbol,
-      n_ensembl_genes,
-      candidate_ensembl_gene_ids
+      precursor_mapping_details,
+      selection_rule
     )
   ]
 
@@ -2170,9 +2563,45 @@ build_ccle_mirna_mimat_mapping <- function(
     na = ""
   )
 
+  # Also audit every MIMAT that remains unmapped after checking all precursors.
+  all_unmapped <- final_mapping[
+    is.na(gene_id),
+    .(
+      id,
+      mature_names,
+      current_mimat_accessions,
+      n_precursors,
+      precursor_accessions,
+      precursor_names,
+      precursor_mapping_details,
+      selection_rule
+    )
+  ]
+
+  fwrite(
+    all_unmapped,
+    file.path(
+      out_dir,
+      "ccle_2019_mirna_unmapped_ensembl_audit.csv"
+    ),
+    na = ""
+  )
+
   cat(
-    "Unique-precursor MIMAT accessions without a unique Ensembl gene:",
-    nrow(unique_precursor_unmapped),
+    "MIMAT accessions with multiple precursors:",
+    nrow(multiple_precursor_audit),
+    "\n"
+  )
+
+  cat(
+    "miRNA precursor symbols with multiple Ensembl mappings:",
+    nrow(multiple_ensembl_audit),
+    "\n"
+  )
+
+  cat(
+    "MIMAT accessions still unmapped after checking all precursors:",
+    nrow(all_unmapped),
     "\n"
   )
 
