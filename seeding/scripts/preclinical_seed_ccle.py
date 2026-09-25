@@ -19,6 +19,10 @@ from ..models.tables import (
     PreClinicalGene,
     PreClinicalMicroarray,
     PreClinicalMutation,
+    PreClinicalMirna,
+    PreClinicalRppa,
+    PreClinicalMethylationTss1kb,
+    PreClinicalMassSpecIntensity,
     PreClinicalRnaSeq,
     PreClinicalSample,
     PreClinicalTreatmentResponse,
@@ -34,6 +38,16 @@ LOAD_RNA_SEQ = True
 LOAD_MICROARRAY = True
 LOAD_CNV = True
 LOAD_MUTATION = True
+LOAD_MIRNA = True
+LOAD_RPPA = True
+LOAD_METHYLATION_TSS_1KB = True
+LOAD_MASSSPEC_INTENSITY = True
+
+# New feature-layer policy:
+# miRNA, RPPA, methylation.tss_1kb, and mass-spec rows are inserted only when
+# gene_id resolves to a non-empty Ensembl ID.
+REQUIRE_FEATURE_GENE_ID = True
+
 RNA_TRANSFORM = "tpm_to_log2_tpm_plus_one"
 # RNA-seq is standardized to log2(TPM + 1) during seeding.
 CNV_TRANSFORM = "linear_cnv_to_log2"
@@ -62,6 +76,37 @@ REQUIRED_TREATMENT_COLUMNS = {
 
 REQUIRED_GENE_COLUMNS = {"id", "name"}
 REQUIRED_MOLECULAR_COLUMNS = {"sample_id", "gene_id", "value"}
+
+REQUIRED_MIRNA_COLUMNS = {
+    "id",
+    "sample_id",
+    "gene_id",
+    "value",
+}
+
+REQUIRED_RPPA_COLUMNS = {
+    "feature_id",
+    "sample_id",
+    "gene_symbol_primary",
+    "gene_id",
+    "value",
+}
+
+REQUIRED_METHYLATION_TSS_1KB_COLUMNS = {
+    "locus_id",
+    "sample_id",
+    "gene_symbol",
+    "gene_id",
+    "value",
+}
+
+REQUIRED_MASSSPEC_INTENSITY_COLUMNS = {
+    "feature_protein_id",
+    "sample_id",
+    "gene_symbol_primary",
+    "gene_id",
+    "value",
+}
 
 
 def tpm_to_log2_tpm_plus_one(value: float | None) -> float | None:
@@ -180,6 +225,70 @@ def build_molecular_load_plan() -> tuple[dict[str, Any], ...]:
                 "required_columns": REQUIRED_MOLECULAR_COLUMNS,
                 "value_transform": None,
                 "value_kind": "mutation_binary",
+            }
+        )
+
+    return tuple(plan)
+
+
+def build_feature_molecular_load_plan() -> tuple[dict[str, Any], ...]:
+    """
+    Build the load plan for CCLE feature-level assays.
+
+    These layers are keyed by their source assay feature rather than only by
+    gene_id because multiple assay features can map to the same gene.
+    """
+    plan: list[dict[str, Any]] = []
+
+    if LOAD_MIRNA:
+        plan.append(
+            {
+                "label": "miRNA",
+                "filename": "pre_clinical_mirna.csv",
+                "model": PreClinicalMirna,
+                "required_columns": REQUIRED_MIRNA_COLUMNS,
+                "source_feature_column": "id",
+                "model_feature_column": "mimat_id",
+                "symbol_column": None,
+            }
+        )
+
+    if LOAD_RPPA:
+        plan.append(
+            {
+                "label": "RPPA",
+                "filename": "pre_clinical_rppa.csv",
+                "model": PreClinicalRppa,
+                "required_columns": REQUIRED_RPPA_COLUMNS,
+                "source_feature_column": "feature_id",
+                "model_feature_column": "feature_id",
+                "symbol_column": "gene_symbol_primary",
+            }
+        )
+
+    if LOAD_METHYLATION_TSS_1KB:
+        plan.append(
+            {
+                "label": "methylation.tss_1kb",
+                "filename": "pre_clinical_methylation_tss_1kb.csv",
+                "model": PreClinicalMethylationTss1kb,
+                "required_columns": REQUIRED_METHYLATION_TSS_1KB_COLUMNS,
+                "source_feature_column": "locus_id",
+                "model_feature_column": "locus_id",
+                "symbol_column": "gene_symbol",
+            }
+        )
+
+    if LOAD_MASSSPEC_INTENSITY:
+        plan.append(
+            {
+                "label": "mass-spec intensity",
+                "filename": "pre_clinical_massspec_intensity.csv",
+                "model": PreClinicalMassSpecIntensity,
+                "required_columns": REQUIRED_MASSSPEC_INTENSITY_COLUMNS,
+                "source_feature_column": "feature_protein_id",
+                "model_feature_column": "feature_protein_id",
+                "symbol_column": "gene_symbol_primary",
             }
         )
 
@@ -346,9 +455,51 @@ def validate_final_tables_model() -> None:
         raise RuntimeError("tables.py must define PreClinicalSample.cell_line_name.")
     if not hasattr(PreClinicalTreatmentResponse, "cid"):
         raise RuntimeError("tables.py must define PreClinicalTreatmentResponse.cid.")
-    for model in (PreClinicalRnaSeq, PreClinicalMicroarray, PreClinicalCopyNumberVariation, PreClinicalMutation):
+    for model in (
+        PreClinicalRnaSeq,
+        PreClinicalMicroarray,
+        PreClinicalCopyNumberVariation,
+        PreClinicalMutation,
+        PreClinicalMirna,
+        PreClinicalRppa,
+        PreClinicalMethylationTss1kb,
+        PreClinicalMassSpecIntensity,
+    ):
         if not hasattr(model, "value"):
             raise RuntimeError(f"tables.py must define {model.__name__}.value.")
+
+    required_feature_fields = {
+        PreClinicalMirna: (
+            "mimat_id",
+            "sample_id",
+            "gene_id",
+        ),
+        PreClinicalRppa: (
+            "feature_id",
+            "sample_id",
+            "gene_symbol_primary",
+            "gene_id",
+        ),
+        PreClinicalMethylationTss1kb: (
+            "locus_id",
+            "sample_id",
+            "gene_symbol",
+            "gene_id",
+        ),
+        PreClinicalMassSpecIntensity: (
+            "feature_protein_id",
+            "sample_id",
+            "gene_symbol_primary",
+            "gene_id",
+        ),
+    }
+
+    for model, fields in required_feature_fields.items():
+        for field in fields:
+            if not hasattr(model, field):
+                raise RuntimeError(
+                    f"tables.py must define {model.__name__}.{field}."
+                )
 
 
 def create_required_tables(engine) -> None:
@@ -359,7 +510,16 @@ def create_required_tables(engine) -> None:
         PreClinicalTreatmentResponse.__table__,
     ]
 
-    if LOAD_RNA_SEQ or LOAD_MICROARRAY or LOAD_CNV or LOAD_MUTATION:
+    if (
+        LOAD_RNA_SEQ
+        or LOAD_MICROARRAY
+        or LOAD_CNV
+        or LOAD_MUTATION
+        or LOAD_MIRNA
+        or LOAD_RPPA
+        or LOAD_METHYLATION_TSS_1KB
+        or LOAD_MASSSPEC_INTENSITY
+    ):
         tables.append(PreClinicalGene.__table__)
     if LOAD_RNA_SEQ:
         tables.append(PreClinicalRnaSeq.__table__)
@@ -369,6 +529,14 @@ def create_required_tables(engine) -> None:
         tables.append(PreClinicalCopyNumberVariation.__table__)
     if LOAD_MUTATION:
         tables.append(PreClinicalMutation.__table__)
+    if LOAD_MIRNA:
+        tables.append(PreClinicalMirna.__table__)
+    if LOAD_RPPA:
+        tables.append(PreClinicalRppa.__table__)
+    if LOAD_METHYLATION_TSS_1KB:
+        tables.append(PreClinicalMethylationTss1kb.__table__)
+    if LOAD_MASSSPEC_INTENSITY:
+        tables.append(PreClinicalMassSpecIntensity.__table__)
 
     Base.metadata.create_all(bind=engine, tables=tables)
 
@@ -463,6 +631,36 @@ def delete_existing_dataset(session: Session, dataset_name: str) -> None:
                 session.execute(
                     delete(PreClinicalCopyNumberVariation).where(
                         PreClinicalCopyNumberVariation.sample_id.in_(sample_id_chunk)
+                    )
+                )
+            if LOAD_MUTATION:
+                session.execute(
+                    delete(PreClinicalMutation).where(
+                        PreClinicalMutation.sample_id.in_(sample_id_chunk)
+                    )
+                )
+            if LOAD_MIRNA:
+                session.execute(
+                    delete(PreClinicalMirna).where(
+                        PreClinicalMirna.sample_id.in_(sample_id_chunk)
+                    )
+                )
+            if LOAD_RPPA:
+                session.execute(
+                    delete(PreClinicalRppa).where(
+                        PreClinicalRppa.sample_id.in_(sample_id_chunk)
+                    )
+                )
+            if LOAD_METHYLATION_TSS_1KB:
+                session.execute(
+                    delete(PreClinicalMethylationTss1kb).where(
+                        PreClinicalMethylationTss1kb.sample_id.in_(sample_id_chunk)
+                    )
+                )
+            if LOAD_MASSSPEC_INTENSITY:
+                session.execute(
+                    delete(PreClinicalMassSpecIntensity).where(
+                        PreClinicalMassSpecIntensity.sample_id.in_(sample_id_chunk)
                     )
                 )
 
@@ -770,6 +968,170 @@ def seed_molecular_file(
     )
 
 
+def seed_feature_molecular_file(
+    session: Session,
+    *,
+    data_dir: Path,
+    filename: str,
+    label: str,
+    model: type,
+    required_columns: set[str],
+    source_feature_column: str,
+    model_feature_column: str,
+    symbol_column: str | None,
+    valid_sample_ids: set[str],
+    valid_gene_ids: set[str],
+    chunksize: int,
+) -> None:
+    """
+    Seed a feature-level CCLE molecular profile.
+
+    These tables preserve the source assay feature as part of the row identity.
+    A mapped Ensembl gene_id is required for insertion. Rows with a NULL, empty,
+    NA-like, or otherwise unmapped gene_id are skipped.
+    """
+    path = data_dir / filename
+
+    total_insert_candidates = 0
+    total_skipped_missing_value = 0
+    total_skipped_missing_gene_id = 0
+
+    for chunk_index, chunk_df in enumerate(
+        iter_csv_chunks(
+            path,
+            chunksize=chunksize,
+        ),
+        start=1,
+    ):
+        require_columns(
+            chunk_df,
+            required_columns,
+            path,
+        )
+
+        chunk_df = chunk_df.copy()
+        chunk_df["sample_id"] = chunk_df["sample_id"].map(clean_str)
+        chunk_df[source_feature_column] = chunk_df[
+            source_feature_column
+        ].map(clean_str)
+        chunk_df["gene_id"] = chunk_df["gene_id"].map(clean_gene_id)
+        chunk_df["__value"] = chunk_df["value"].map(clean_float)
+
+        if symbol_column is not None:
+            chunk_df[symbol_column] = chunk_df[
+                symbol_column
+            ].map(clean_str)
+
+        # A sample, source feature, and mapped Ensembl gene_id are required.
+        # New-profile rows without gene_id are intentionally not uploaded.
+        before_gene_id_filter = len(chunk_df)
+
+        required_mask = (
+            chunk_df["sample_id"].notna()
+            & chunk_df[source_feature_column].notna()
+        )
+
+        if REQUIRE_FEATURE_GENE_ID:
+            required_mask = required_mask & chunk_df["gene_id"].notna()
+
+        chunk_df = chunk_df[required_mask]
+
+        total_skipped_missing_gene_id += (
+            before_gene_id_filter - len(chunk_df)
+        )
+
+        chunk_sample_ids = set(chunk_df["sample_id"])
+        validate_molecular_samples_prefixed(
+            chunk_sample_ids,
+            label=label,
+        )
+
+        missing_sample_ids = sorted(
+            chunk_sample_ids - valid_sample_ids
+        )
+        if missing_sample_ids:
+            preview = ", ".join(missing_sample_ids[:20])
+            raise ValueError(
+                f"CCLE {label} has sample_id values missing from "
+                f"pre_clinical_sample. Examples: {preview}"
+            )
+
+        chunk_gene_ids = set(chunk_df["gene_id"])
+        missing_gene_ids = sorted(
+            chunk_gene_ids - valid_gene_ids
+        )
+        if missing_gene_ids:
+            preview = ", ".join(missing_gene_ids[:20])
+            raise ValueError(
+                f"CCLE {label} has mapped gene_id values missing from "
+                f"pre_clinical_gene. Examples: {preview}"
+            )
+
+        before_value_filter = len(chunk_df)
+        chunk_df = chunk_df[
+            chunk_df["__value"].notna()
+        ]
+        total_skipped_missing_value += (
+            before_value_filter - len(chunk_df)
+        )
+
+        # Preserve one value per sample + original assay feature.
+        chunk_df = chunk_df.drop_duplicates(
+            subset=[
+                "sample_id",
+                source_feature_column,
+            ],
+            keep="first",
+        )
+
+        rows: list[dict[str, Any]] = []
+
+        for row in chunk_df.to_dict(
+            orient="records"
+        ):
+            payload: dict[str, Any] = {
+                "sample_id": row["sample_id"],
+                model_feature_column: row[
+                    source_feature_column
+                ],
+                "gene_id": row["gene_id"],
+                "value": float(row["__value"]),
+            }
+
+            if symbol_column is not None:
+                payload[symbol_column] = clean_str(
+                    row.get(symbol_column)
+                )
+
+            rows.append(payload)
+
+        if rows:
+            stmt = mysql_insert(
+                model.__table__
+            ).prefix_with("IGNORE")
+            session.execute(
+                stmt,
+                rows,
+            )
+            session.flush()
+
+        total_insert_candidates += len(rows)
+
+        print(
+            f"Seeded CCLE {label} chunk {chunk_index}: "
+            f"{len(rows)} candidate rows"
+        )
+
+    print(
+        f"Finished CCLE {label}: "
+        f"{total_insert_candidates} candidate rows. "
+        f"Skipped rows with missing/unmapped gene_id: "
+        f"{total_skipped_missing_gene_id}. "
+        f"Skipped non-finite/missing values: "
+        f"{total_skipped_missing_value}"
+    )
+
+
 def seed_dataset(
     *,
     data_dir: Path,
@@ -785,7 +1147,7 @@ def seed_dataset(
 
     with Session(engine) as session:
         if replace:
-            print(f"Replacing existing dataset rows for {CCLE}")
+            print(f"Replacing existing dataset rows for {dataset_name}")
             delete_existing_dataset(session, dataset_name)
             session.commit()
 
@@ -813,12 +1175,20 @@ def seed_dataset(
         )
 
         molecular_plan = build_molecular_load_plan()
-        if molecular_plan:
-            seed_genes(session, data_dir=data_dir)
+        feature_molecular_plan = build_feature_molecular_load_plan()
+
+        if molecular_plan or feature_molecular_plan:
+            seed_genes(
+                session,
+                data_dir=data_dir,
+            )
         session.commit()
 
-        if molecular_plan:
-            valid_sample_ids = get_sample_ids_for_dataset(session, dataset.id)
+        if molecular_plan or feature_molecular_plan:
+            valid_sample_ids = get_sample_ids_for_dataset(
+                session,
+                dataset.id,
+            )
             valid_gene_ids = get_gene_ids(session)
 
             for plan in molecular_plan:
@@ -837,12 +1207,37 @@ def seed_dataset(
                 )
                 session.commit()
 
-    print(f"Finished CCLE preclinical seeding, including binary mutation values (wt=0, other non-missing=1).")
+            for plan in feature_molecular_plan:
+                seed_feature_molecular_file(
+                    session,
+                    data_dir=data_dir,
+                    filename=plan["filename"],
+                    label=plan["label"],
+                    model=plan["model"],
+                    required_columns=plan["required_columns"],
+                    source_feature_column=plan[
+                        "source_feature_column"
+                    ],
+                    model_feature_column=plan[
+                        "model_feature_column"
+                    ],
+                    symbol_column=plan["symbol_column"],
+                    valid_sample_ids=valid_sample_ids,
+                    valid_gene_ids=valid_gene_ids,
+                    chunksize=chunksize,
+                )
+                session.commit()
+
+    print(
+        "Finished CCLE preclinical seeding with RNA-seq, microarray, CNV, "
+        "binary mutation, miRNA, RPPA, methylation.tss_1kb, and "
+        "mass-spec intensity layers."
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description=f"Seed the CCLE preclinical dataset from extracted CSVs, including binary mutation calls."
+        description=("Seed CCLE preclinical data, including mutation, miRNA, RPPA, " "methylation.tss_1kb, and mass-spec intensity.")
     )
     parser.add_argument(
         "--data-dir",

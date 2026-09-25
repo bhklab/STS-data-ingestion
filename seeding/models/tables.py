@@ -70,6 +70,13 @@ Molecular CSVs:
     pre_clinical_microarray.csv: sample_id,gene_id,value
     pre_clinical_copy_number_variation.csv: sample_id,gene_id,value
     pre_clinical_mutation.csv: sample_id,gene_id,value
+    pre_clinical_mirna.csv: id,sample_id,gene_id,value
+    pre_clinical_rppa.csv:
+        feature_id,sample_id,gene_symbol_primary,gene_id,value
+    pre_clinical_methylation_tss_1kb.csv:
+        locus_id,sample_id,gene_symbol,gene_id,value
+    pre_clinical_massspec_intensity.csv:
+        feature_protein_id,sample_id,gene_symbol_primary,gene_id,value
 
 pre_clinical_gene.csv:
     id,name
@@ -252,6 +259,22 @@ class PreClinicalSample(Base):
         cascade="all, delete-orphan",
     )
     mutations: Mapped[list["PreClinicalMutation"]] = relationship(
+        back_populates="sample",
+        cascade="all, delete-orphan",
+    )
+    mirna_data: Mapped[list["PreClinicalMirna"]] = relationship(
+        back_populates="sample",
+        cascade="all, delete-orphan",
+    )
+    rppa_data: Mapped[list["PreClinicalRppa"]] = relationship(
+        back_populates="sample",
+        cascade="all, delete-orphan",
+    )
+    methylation_tss_1kb_data: Mapped[list["PreClinicalMethylationTss1kb"]] = relationship(
+        back_populates="sample",
+        cascade="all, delete-orphan",
+    )
+    massspec_intensity_data: Mapped[list["PreClinicalMassSpecIntensity"]] = relationship(
         back_populates="sample",
         cascade="all, delete-orphan",
     )
@@ -475,3 +498,116 @@ class PreClinicalMutation(Base):
     )
 
     sample: Mapped["PreClinicalSample"] = relationship(back_populates="mutations")
+
+class PreClinicalMirna(Base):
+    __tablename__ = "pre_clinical_mirna"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    sample_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("pre_clinical_sample.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    mimat_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    gene_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "sample_id",
+            "mimat_id",
+            name="uq_pc_mirna_sample_mimat",
+        ),
+    )
+
+    sample: Mapped["PreClinicalSample"] = relationship(
+        back_populates="mirna_data"
+    )
+
+
+class PreClinicalRppa(Base):
+    __tablename__ = "pre_clinical_rppa"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    sample_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("pre_clinical_sample.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    feature_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    gene_symbol_primary: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    gene_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "sample_id",
+            "feature_id",
+            name="uq_pc_rppa_sample_feature",
+        ),
+    )
+
+    sample: Mapped["PreClinicalSample"] = relationship(
+        back_populates="rppa_data"
+    )
+
+
+class PreClinicalMethylationTss1kb(Base):
+    __tablename__ = "pre_clinical_methylation_tss_1kb"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    sample_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("pre_clinical_sample.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    locus_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    gene_symbol: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    gene_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "sample_id",
+            "locus_id",
+            name="uq_pc_methylation_tss1kb_sample_locus",
+        ),
+    )
+
+    sample: Mapped["PreClinicalSample"] = relationship(
+        back_populates="methylation_tss_1kb_data"
+    )
+
+
+class PreClinicalMassSpecIntensity(Base):
+    __tablename__ = "pre_clinical_massspec_intensity"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    sample_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("pre_clinical_sample.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    feature_protein_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    gene_symbol_primary: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    gene_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "sample_id",
+            "feature_protein_id",
+            name="uq_pc_massspec_sample_feature",
+        ),
+    )
+
+    sample: Mapped["PreClinicalSample"] = relationship(
+        back_populates="massspec_intensity_data"
+    )
+

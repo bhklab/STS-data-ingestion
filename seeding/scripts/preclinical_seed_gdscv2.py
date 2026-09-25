@@ -465,6 +465,12 @@ def delete_existing_dataset(session: Session, dataset_name: str) -> None:
                         PreClinicalCopyNumberVariation.sample_id.in_(sample_id_chunk)
                     )
                 )
+            if LOAD_MUTATION:
+                session.execute(
+                    delete(PreClinicalMutation).where(
+                        PreClinicalMutation.sample_id.in_(sample_id_chunk)
+                    )
+                )
 
     session.execute(
         delete(PreClinicalTreatmentResponse).where(
@@ -785,7 +791,7 @@ def seed_dataset(
 
     with Session(engine) as session:
         if replace:
-            print(f"Replacing existing dataset rows for {GDSCv2}")
+            print(f"Replacing existing dataset rows for {dataset_name}")
             delete_existing_dataset(session, dataset_name)
             session.commit()
 

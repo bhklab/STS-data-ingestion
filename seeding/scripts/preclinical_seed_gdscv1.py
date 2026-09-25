@@ -467,6 +467,12 @@ def delete_existing_dataset(session: Session, dataset_name: str) -> None:
                         PreClinicalCopyNumberVariation.sample_id.in_(sample_id_chunk)
                     )
                 )
+            if LOAD_MUTATION:
+                session.execute(
+                    delete(PreClinicalMutation).where(
+                        PreClinicalMutation.sample_id.in_(sample_id_chunk)
+                    )
+                )
 
     session.execute(
         delete(PreClinicalTreatmentResponse).where(

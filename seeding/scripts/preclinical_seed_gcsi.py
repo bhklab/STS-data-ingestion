@@ -32,8 +32,9 @@ DEFAULT_CHUNK_SIZE = 100_000
 LOAD_RNA_SEQ = True
 LOAD_MICROARRAY = False
 LOAD_CNV = True
-RNA_TRANSFORM = "log2_tpm_plus_pseudocount_to_log2_tpm_plus_one"
-# RNA-seq is standardized to log2(TPM + 1) during seeding.
+# Mutation is intentionally not seeded for GCSI.
+LOAD_MUTATION = False
+RNA_TRANSFORM = "log2_tpm_plus_pseudocount_to_tpm"
 CNV_TRANSFORM = "none"
 
 
@@ -62,19 +63,6 @@ REQUIRED_GENE_COLUMNS = {"id", "name"}
 REQUIRED_MOLECULAR_COLUMNS = {"sample_id", "gene_id", "value"}
 
 
-def tpm_to_log2_tpm_plus_one(value: float | None) -> float | None:
-    """Convert TPM values to the standardized log2(TPM + 1) scale."""
-    if value is None:
-        return None
-    if value < 0:
-        return None
-
-    out = math.log2(value + 1.0)
-    if not math.isfinite(out):
-        return None
-    return out
-
-
 def log2_tpm_plus_pseudocount_to_tpm(value: float | None) -> float | None:
     """Convert log2(TPM + 0.001) values back to TPM."""
     if value is None:
@@ -84,14 +72,6 @@ def log2_tpm_plus_pseudocount_to_tpm(value: float | None) -> float | None:
     if not math.isfinite(out):
         return None
     return out
-
-
-def log2_tpm_plus_pseudocount_to_log2_tpm_plus_one(
-    value: float | None,
-) -> float | None:
-    """Convert log2(TPM + 0.001) source values to standardized log2(TPM + 1)."""
-    tpm = log2_tpm_plus_pseudocount_to_tpm(value)
-    return tpm_to_log2_tpm_plus_one(tpm)
 
 
 def linear_cnv_to_log2(value: float | None) -> float | None:
@@ -108,12 +88,8 @@ def linear_cnv_to_log2(value: float | None) -> float | None:
 
 
 def get_value_transform(transform_name: str) -> Callable[[float | None], float | None] | None:
-    if transform_name == "tpm_to_log2_tpm_plus_one":
-        return tpm_to_log2_tpm_plus_one
     if transform_name == "log2_tpm_plus_pseudocount_to_tpm":
         return log2_tpm_plus_pseudocount_to_tpm
-    if transform_name == "log2_tpm_plus_pseudocount_to_log2_tpm_plus_one":
-        return log2_tpm_plus_pseudocount_to_log2_tpm_plus_one
     if transform_name == "linear_cnv_to_log2":
         return linear_cnv_to_log2
     if transform_name in {"", "none", "None", "null"}:
@@ -755,7 +731,7 @@ def seed_dataset(
 
     with Session(engine) as session:
         if replace:
-            print(f"Replacing existing dataset rows for {gCSI}")
+            print(f"Replacing existing dataset rows for {dataset_name}")
             delete_existing_dataset(session, dataset_name)
             session.commit()
 
