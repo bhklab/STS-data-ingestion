@@ -64,6 +64,9 @@ TARGET_CELL_LINES <- unique(trimws(
 # Final output sample IDs will look like gdscv2_A-204, gdscv2_CAL-78, etc.
 SAMPLE_ID_PREFIX <- "gdscv2_"
 
+# Normalize any legacy GDSC-prefixed source sample IDs to the GDSCv2 prefix.
+LEGACY_SAMPLE_ID_PREFIXES <- c("gdsc_")
+
 RNA_SEQ_PROFILE_NAME <- "Kallisto_0.46.1.rnaseq"
 MICROARRAY_PROFILE_NAME <- "rna"
 CNV_PROFILE_NAME <- "cnv"
@@ -129,13 +132,48 @@ normalize_category_value <- function(x) {
 
 make_prefixed_sample_id <- function(cell_line_name) {
   cell_line_name <- clean_na(cell_line_name)
-  out <- rep(NA_character_, length(cell_line_name))
+
+  out <- rep(
+    NA_character_,
+    length(cell_line_name)
+  )
+
   keep_idx <- !is.na(cell_line_name)
 
+  if (!any(keep_idx)) {
+    return(out)
+  }
+
+  values <- cell_line_name[keep_idx]
+
+  # Already-correct IDs remain unchanged.
+  already_gdscv2 <- startsWith(
+    tolower(values),
+    tolower(SAMPLE_ID_PREFIX)
+  )
+
+  # Convert legacy gdsc_<sample> values to gdscv2_<sample>.
+  for (legacy_prefix in LEGACY_SAMPLE_ID_PREFIXES) {
+    legacy_match <- startsWith(
+      tolower(values),
+      tolower(legacy_prefix)
+    ) & !already_gdscv2
+
+    if (any(legacy_match)) {
+      values[legacy_match] <- substring(
+        values[legacy_match],
+        nchar(legacy_prefix) + 1L
+      )
+    }
+  }
+
   out[keep_idx] <- ifelse(
-    startsWith(cell_line_name[keep_idx], SAMPLE_ID_PREFIX),
-    cell_line_name[keep_idx],
-    paste0(SAMPLE_ID_PREFIX, cell_line_name[keep_idx])
+    already_gdscv2,
+    values,
+    paste0(
+      SAMPLE_ID_PREFIX,
+      values
+    )
   )
 
   out
