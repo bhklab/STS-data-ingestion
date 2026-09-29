@@ -1,87 +1,95 @@
-# Preclinical Data Pipeline: End-to-End Rerun Guide
+## Preclinical Data Pipeline
 
-This README documents the full end-to-end process for regenerating extracted preclinical CSVs and reseeding the `sts_portal_beta` MySQL database.
+The preclinical pipeline extracts soft-tissue cell-line data from PharmacoSet/RDS sources, normalizes the extracted data into a common schema, and seeds the processed data into MySQL.
 
-The workflow is:
+The datasets currently supported are:
 
-1. Confirm required raw input files are present.
-2. Drop existing preclinical tables.
-3. Run extraction scripts to generate processed CSVs.
-4. Seed each dataset into MySQL.
-5. Seed drug annotations from AnnotationDB.
-6. Seed cell-line annotations from AnnotationDB and OncoTree.
-7. Run basic validation checks.
+- PRISM
+- CTRPv2
+- CCLE
+- GCSI
+- GDSCv1
+- GDSCv2
+
+The general workflow is:
+
+```text
+Raw RDS / metadata files
+        ↓
+Dataset-specific R extraction
+        ↓
+Processed preclinical CSVs
+        ↓
+Dataset-specific Python seeders
+        ↓
+MySQL preclinical tables
+        ↓
+Gene-name normalization
+        ↓
+Drug + cell-line annotation enrichment
+```
+
+### 1. Install the environment
+
+From the repository root:
+
+```bash
+pixi install
+```
+
+All commands below should also be run from the repository root.
 
 ---
 
-## 1. Required raw input files
+### 2. Required raw preclinical files
 
-All raw input files must be placed in:
+Raw preclinical inputs are stored under:
 
-```bash
+```text
 extraction/data/raw/preclinical/
 ```
 
-Required PSet files:
+The complete extraction currently expects the following RDS files (ensure same naming convention):
 
 ```text
-CCLE_2019.rds
 CCLE_2015.rds
+CCLE_2019.rds
 GCSI_2019.rds
 PSet_PRISM.rds
 Pset_CTRPv2.rds
+PSet_GDSCv1.rds
 PSet_GDSCv2.rds
 ```
 
-Source notes:
-
-```text
-CCLE_2015.rds  -> ORCESTRA
-CCLE_2019.rds  -> ORCESTRA
-PSet_GDSCv2.rds -> ORCESTRA
-GCSI_2019.rds  -> Azure
-PSet_PRISM.rds -> Azure
-Pset_CTRPv2.rds -> Azure
-```
-
-Required CSV files:
+The following metadata/mapping files are also required:
 
 ```text
 All_PSets_sarcoma_cell_line_QC.csv
 combined_datasets.csv
+biomart_genes.csv
 ```
 
-Purpose of the CSVs:
+`All_PSets_sarcoma_cell_line_QC.csv` is used to define the final soft-tissue cell-line set. Dataset-specific extraction scripts match their samples to rows where:
 
 ```text
-All_PSets_sarcoma_cell_line_QC.csv
-  Used by all extraction scripts for the final mod_tissueid == "Soft Tissue" filtering.
-
-combined_datasets.csv
-  Used by all seeding scripts to populate the datasets table.
+mod_tissueid == "Soft Tissue"
 ```
 
-Recommended check:
+`combined_datasets.csv` contains metadata used to populate the `datasets` table.
+
+`biomart_genes.csv` provides Ensembl gene ID / gene-name mappings and is also used when normalizing the final `pre_clinical_gene` table.
+
+A quick input check can be run with:
 
 ```bash
 ls -lh extraction/data/raw/preclinical/
 ```
 
-You should see the six `.rds` files and the two `.csv` files listed above.
-
 ---
 
-## 2. Drop existing preclinical tables
+### 3. Optional: clean the existing preclinical database
 
-Before doing a full clean reload, drop the existing preclinical tables from `sts_portal_beta`.
-
-Open MySQL:
-
-```bash
-mysql -u YOUR_USER -p sts_portal_beta
-```
-
-Then run:
+For a complete clean reload, remove the existing preclinical tables first.
 
 ```sql
 USE sts_portal_beta;
@@ -90,57 +98,65 @@ SET FOREIGN_KEY_CHECKS = 0;
 
 DROP TABLE IF EXISTS pre_clinical_cell_line_info;
 DROP TABLE IF EXISTS drugs;
-DROP TABLE IF EXISTS pre_clinical_microarray;
-DROP TABLE IF EXISTS pre_clinical_copy_number_variation;
+
+DROP TABLE IF EXISTS pre_clinical_mirna;
+DROP TABLE IF EXISTS pre_clinical_rppa;
+DROP TABLE IF EXISTS pre_clinical_methylation_tss_1kb;
+DROP TABLE IF EXISTS pre_clinical_massspec_intensity;
+
 DROP TABLE IF EXISTS pre_clinical_mutation;
 DROP TABLE IF EXISTS pre_clinical_rna_seq;
+DROP TABLE IF EXISTS pre_clinical_microarray;
+DROP TABLE IF EXISTS pre_clinical_copy_number_variation;
+
 DROP TABLE IF EXISTS pre_clinical_treatment_response;
 DROP TABLE IF EXISTS pre_clinical_sample;
 DROP TABLE IF EXISTS pre_clinical_gene;
 DROP TABLE IF EXISTS pre_clinical_cell_line;
+
 DROP TABLE IF EXISTS pre_clinical_dataset;
 DROP TABLE IF EXISTS datasets;
 
 SET FOREIGN_KEY_CHECKS = 1;
 ```
 
-This removes all preclinical data and schema objects so the rerun starts cleanly.
+The dataset seeders recreate the required tables through the SQLAlchemy models.
+
+For a clean database reload, do **not** use `--replace`.
 
 ---
 
-## 3. Run extraction scripts
+### 4. Run all preclinical extractions
 
-Run from the repository root.
+The extraction scripts read the raw RDS files and produce normalized CSVs under:
 
-```bash
-R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_prism_preclinical.R
-
-R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_ctrpv2_preclinical.R
-
-R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_ccle_preclinical.R
-
-R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_gcsi_preclinical.R
-
-R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_gdscv2_preclinical.R
+```text
+extraction/data/proc/preclinical/
 ```
 
-The extraction scripts read raw PSets from:
+On macOS, the following invocation also prevents R from using packages from the user's global R library and increases the available R vector heap:
 
 ```bash
-extraction/data/raw/preclinical/
+R_LIBS_USER=NULL R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_prism_preclinical.R
+R_LIBS_USER=NULL R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_ctrpv2_preclinical.R
+R_LIBS_USER=NULL R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_ccle_preclinical.R
+R_LIBS_USER=NULL R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_gcsi_preclinical.R
+R_LIBS_USER=NULL R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_gdscv1_preclinical.R
+R_LIBS_USER=NULL R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_gdscv2_preclinical.R
 ```
 
-and write processed CSVs into:
+The processed output directories are:
 
 ```text
 extraction/data/proc/preclinical/PRISM/
 extraction/data/proc/preclinical/CTRPv2/
 extraction/data/proc/preclinical/CCLE/
 extraction/data/proc/preclinical/GCSI/
+extraction/data/proc/preclinical/GDSCv1/
 extraction/data/proc/preclinical/GDSCv2/
 ```
 
-Expected processed outputs vary by dataset, but include files such as:
+Depending on the dataset, generated files include:
 
 ```text
 pre_clinical_cell_line.csv
@@ -153,34 +169,44 @@ pre_clinical_copy_number_variation.csv
 pre_clinical_mutation.csv
 ```
 
-Notes:
+CCLE additionally generates:
 
-- PRISM and CTRPv2 only produce sample/cell-line/treatment-response style outputs.
-- Mutation CSVs may be generated for molecular datasets, but mutation insertion is intentionally skipped during seeding.
-- Final cell-line selection is based on `All_PSets_sarcoma_cell_line_QC.csv` where `mod_tissueid == "Soft Tissue"`.
-- Original dataset-specific soft-tissue criteria are used only for audit/comparison outputs, not for final extraction.
+```text
+pre_clinical_mirna.csv
+pre_clinical_rppa.csv
+pre_clinical_methylation_tss_1kb.csv
+pre_clinical_massspec_intensity.csv
+```
+
+The CCLE feature profiles are sourced from:
+
+```text
+mirna.mimat_expression
+proteomics.rppa
+methylation.tss_1kb
+proteomics.massspec_intensity
+```
+
+CCLE uses both the 2019 and 2015 PSets. The 2019 PSet provides the primary molecular profiles, while the 2015 PSet is used for the legacy microarray data and treatment response data.
+
+> **CCLE extractor note:** the finalized extractor containing miRNA, RPPA, methylation, and mass-spec support should be the version stored as `extract_ccle_preclinical.R`. If the finalized file is still named `extract_ccle_preclinical_with_rppa_methylation_massspec.R`, run that filename instead.
 
 ---
 
-## 4. Seed extracted datasets into MySQL
+### 5. Seed all datasets into MySQL
 
-Run from the repository root after all extraction scripts complete successfully.
+After all extraction scripts complete successfully, seed each dataset:
 
 ```bash
 pixi run python -m seeding.scripts.preclinical_seed_prism
-
 pixi run python -m seeding.scripts.preclinical_seed_ctrpv2
-
 pixi run python -m seeding.scripts.preclinical_seed_ccle
-
 pixi run python -m seeding.scripts.preclinical_seed_gcsi
-
+pixi run python -m seeding.scripts.preclinical_seed_gdscv1
 pixi run python -m seeding.scripts.preclinical_seed_gdscv2
 ```
 
-These scripts insert the processed CSV data into MySQL.
-
-The seeders populate:
+The seeders populate the shared preclinical schema, including:
 
 ```text
 datasets
@@ -188,309 +214,240 @@ pre_clinical_cell_line
 pre_clinical_sample
 pre_clinical_treatment_response
 pre_clinical_gene
+
 pre_clinical_rna_seq
 pre_clinical_microarray
 pre_clinical_copy_number_variation
+pre_clinical_mutation
 ```
 
-Mutation insertion is intentionally skipped.
+CCLE also populates:
 
----
+```text
+pre_clinical_mirna
+pre_clinical_rppa
+pre_clinical_methylation_tss_1kb
+pre_clinical_massspec_intensity
+```
 
-## 5. RNA-seq standardization
+Mutation loading behavior is:
 
-RNA-seq values are standardized during seeding to:
+```text
+CCLE     -> loaded
+GDSCv1   -> loaded
+GDSCv2   -> loaded
+GCSI     -> intentionally skipped
+```
+
+Mutation values are standardized to binary values:
+
+```text
+wt                  -> 0
+other mutation call -> 1
+```
+
+RNA-seq values are normalized by the dataset seeders to the shared:
 
 ```text
 log2(TPM + 1)
 ```
 
-Dataset-specific behavior:
+representation where applicable.
 
-```text
-CCLE:
-  Source RNA-seq is already TPM.
-  Seeder transforms TPM -> log2(TPM + 1).
-
-GCSI:
-  Source RNA-seq is log2(TPM + 0.001).
-  Seeder transforms log2(TPM + 0.001) -> TPM -> log2(TPM + 1).
-
-GDSCv2:
-  Source RNA-seq is log2(TPM + 0.001).
-  Seeder transforms log2(TPM + 0.001) -> TPM -> log2(TPM + 1).
-```
+For the CCLE miRNA, RPPA, methylation, and mass-spec layers, rows that cannot be mapped to a valid Ensembl `gene_id` are intentionally skipped rather than inserted with a null gene ID.
 
 ---
 
-## 6. CNV handling
+### 6. Normalize gene names
 
-CNV values are stored as gene-level log2 copy-number values.
+Each molecular dataset may contribute Ensembl IDs with incomplete, inconsistent, or missing gene names.
 
-Dataset-specific behavior:
+After **all six dataset seeders have finished**, normalize the shared `pre_clinical_gene` table using the local BioMart snapshot:
 
-```text
-CCLE:
-  Source CNV is linear copy-ratio.
-  Seeder transforms value -> log2(value).
-  Non-positive values are treated as missing and skipped.
-
-GCSI:
-  Source CNV already appears log2-scaled.
-  Seeder stores CNV as-is.
-
-GDSCv2:
-  Source CNV already appears log2-scaled.
-  Seeder stores CNV as-is.
+```bash
+pixi run python -m seeding.scripts.update_gene_table_names
 ```
 
----
+The script uses:
 
-## 7. Gene ID cleaning
+```text
+extraction/data/raw/preclinical/biomart_genes.csv
+```
 
-Gene Ensembl IDs are cleaned by removing any suffix beginning with a period.
+and expects the BioMart columns:
 
-Example:
+```text
+Gene stable ID
+Gene name
+```
+
+Ensembl version/postfix suffixes are normalized before matching. For example:
 
 ```text
 ENSG00000002586.20_PAR_Y -> ENSG00000002586
+ENSG00000123456.7        -> ENSG00000123456
 ```
 
-The gene table uses global Ensembl IDs. If a gene ID already exists, seeders skip inserting that gene again and do not replace the existing gene name.
+The update is deliberately run only after all dataset seeders so that `pre_clinical_gene` already contains the union of gene IDs contributed by CCLE, GCSI, GDSCv1, and GDSCv2.
+
+Audit files are produced for updated genes, already-correct names, and IDs not found in the BioMart snapshot.
 
 ---
 
-## 8. Seed the drugs table from treatment-response CIDs
+### 7. Seed drug annotations
 
-Run after all treatment-response rows have been seeded.
+Once all treatment-response rows are available, populate the `drugs` table from AnnotationDB:
 
 ```bash
 pixi run python -m seeding.scripts.preclinical_seed_drugs_from_annotationdb --batch-size 250
 ```
 
-Optional test run:
+The script collects the unique non-null compound CIDs from `pre_clinical_treatment_response`, queries AnnotationDB in batches, and upserts the returned annotations into `drugs`.
 
-```bash
-pixi run python -m seeding.scripts.preclinical_seed_drugs_from_annotationdb \
-  --limit 10 \
-  --batch-size 10
-```
-
-This script:
-
-1. Queries unique non-null `cid` values from `pre_clinical_treatment_response`.
-2. Calls AnnotationDB using batches of up to 250 compounds.
-3. Inserts returned compound annotations into the `drugs` table.
-4. Stores only the first mechanism object from the AnnotationDB `mechanisms` list.
-5. Writes audit CSVs for returned and missing CIDs.
-
-AnnotationDB route pattern:
-
-```text
-https://annotationdb.bhklab.ca/compound/many?compound=<cid>&compound=<cid>&format=json&bioassay=false&mechanism=true&toxicity=false&golden_bioassay=false
-```
-
-Audit outputs:
-
-```text
-extraction/data/proc/preclinical/drugs/drug_cids_returned_annotationdb.csv
-extraction/data/proc/preclinical/drugs/drug_cids_not_found_annotationdb.csv
-```
+AnnotationDB currently limits this seeder to a maximum batch size of 250.
 
 ---
 
-## 9. Seed cell-line info from Cellosaurus accessions
+### 8. Seed cell-line annotations
 
-Run after all `pre_clinical_cell_line` rows have been seeded.
+After all datasets have populated `pre_clinical_cell_line`, enrich the unique Cellosaurus accessions:
 
 ```bash
 pixi run python -m seeding.scripts.preclinical_seed_cell_line_info_from_annotationdb --batch-size 250
 ```
 
-Optional test run:
-
-```bash
-pixi run python -m seeding.scripts.preclinical_seed_cell_line_info_from_annotationdb \
-  --limit 10 \
-  --batch-size 10
-```
-
-This script:
-
-1. Queries unique non-null Cellosaurus accessions from `pre_clinical_cell_line.accession`.
-2. Calls AnnotationDB cell-line endpoint in batches.
-3. Inserts returned annotations into `pre_clinical_cell_line_info`.
-4. Flattens disease objects into pipe-separated fields.
-5. Queries OncoTree using disease descriptions to resolve disease hierarchy.
-
-AnnotationDB route pattern:
+This step:
 
 ```text
-https://annotationdb.bhklab.ca/cell_line/many?cell_lines=CVCL_1058,CVCL_1205&format=json
+pre_clinical_cell_line.accession
+        ↓
+AnnotationDB
+        ↓
+cell-line metadata
+        ↓
+OncoTree disease resolution
+        ↓
+pre_clinical_cell_line_info
 ```
 
-Disease flattening:
-
-```text
-disease_ids = C8971|Orphanet_99757
-disease_descriptions = Embryonal rhabdomyosarcoma|Embryonal rhabdomyosarcoma
-```
-
-OncoTree behavior:
-
-```text
-For each disease description:
-  1. Query OncoTree by disease name.
-  2. If no hit / 404, move to the next disease description.
-  3. If a hit is found, recursively query by parent code until level == 2.
-  4. Store:
-       first_level  = parent from level-2 response, with underscores replaced by spaces
-       second_level = name from level-2 response
-```
-
-If none of the disease descriptions resolve to OncoTree, then:
-
-```text
-first_level = NULL
-second_level = NULL
-```
-
-Audit outputs:
-
-```text
-extraction/data/proc/preclinical/cell_line_info/cell_line_accessions_returned_annotationdb.csv
-extraction/data/proc/preclinical/cell_line_info/cell_line_accessions_not_found_annotationdb.csv
-extraction/data/proc/preclinical/cell_line_info/cell_line_info_oncotree_unresolved.csv
-```
+The seeder also writes audit CSVs for Cellosaurus accessions not returned by AnnotationDB and disease descriptions that could not be resolved through OncoTree.
 
 ---
 
-## 10. Full clean run command sequence
+### 9. Validate the load
 
-After dropping the tables in MySQL, run:
-
-```bash
-R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_prism_preclinical.R
-R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_ctrpv2_preclinical.R
-R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_ccle_preclinical.R
-R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_gcsi_preclinical.R
-R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_gdscv2_preclinical.R
-
-pixi run python -m seeding.scripts.preclinical_seed_prism
-pixi run python -m seeding.scripts.preclinical_seed_ctrpv2
-pixi run python -m seeding.scripts.preclinical_seed_ccle
-pixi run python -m seeding.scripts.preclinical_seed_gcsi
-pixi run python -m seeding.scripts.preclinical_seed_gdscv2
-
-pixi run python -m seeding.scripts.preclinical_seed_drugs_from_annotationdb --batch-size 250
-
-pixi run python -m seeding.scripts.preclinical_seed_cell_line_info_from_annotationdb --batch-size 250
-```
-
----
-
-## 11. Quick validation queries
-
-Run these in MySQL after seeding.
+After the complete pipeline finishes, basic row counts can be checked with:
 
 ```sql
 USE sts_portal_beta;
 
 SELECT * FROM datasets;
 
-SELECT COUNT(*) AS cell_line_count FROM pre_clinical_cell_line;
-SELECT COUNT(*) AS sample_count FROM pre_clinical_sample;
-SELECT COUNT(*) AS treatment_response_count FROM pre_clinical_treatment_response;
-SELECT COUNT(*) AS gene_count FROM pre_clinical_gene;
-SELECT COUNT(*) AS rnaseq_count FROM pre_clinical_rna_seq;
-SELECT COUNT(*) AS microarray_count FROM pre_clinical_microarray;
-SELECT COUNT(*) AS cnv_count FROM pre_clinical_copy_number_variation;
-SELECT COUNT(*) AS drug_count FROM drugs;
-SELECT COUNT(*) AS cell_line_info_count FROM pre_clinical_cell_line_info;
-```
+SELECT COUNT(*) AS cell_lines
+FROM pre_clinical_cell_line;
 
-Check RNA-seq range:
+SELECT COUNT(*) AS samples
+FROM pre_clinical_sample;
 
-```sql
-SELECT
-  MIN(value) AS min_rnaseq,
-  AVG(value) AS mean_rnaseq,
-  MAX(value) AS max_rnaseq
+SELECT COUNT(*) AS treatment_responses
+FROM pre_clinical_treatment_response;
+
+SELECT COUNT(*) AS genes
+FROM pre_clinical_gene;
+
+SELECT COUNT(*) AS rna_seq
 FROM pre_clinical_rna_seq;
-```
 
-RNA-seq should be non-negative because it is stored as `log2(TPM + 1)`.
+SELECT COUNT(*) AS microarray
+FROM pre_clinical_microarray;
 
-Check CNV range:
-
-```sql
-SELECT
-  MIN(value) AS min_cnv,
-  AVG(value) AS mean_cnv,
-  MAX(value) AS max_cnv
+SELECT COUNT(*) AS cnv
 FROM pre_clinical_copy_number_variation;
+
+SELECT COUNT(*) AS mutations
+FROM pre_clinical_mutation;
+
+SELECT COUNT(*) AS mirna
+FROM pre_clinical_mirna;
+
+SELECT COUNT(*) AS rppa
+FROM pre_clinical_rppa;
+
+SELECT COUNT(*) AS methylation_tss_1kb
+FROM pre_clinical_methylation_tss_1kb;
+
+SELECT COUNT(*) AS massspec_intensity
+FROM pre_clinical_massspec_intensity;
+
+SELECT COUNT(*) AS drugs
+FROM drugs;
+
+SELECT COUNT(*) AS cell_line_info
+FROM pre_clinical_cell_line_info;
 ```
 
-CNV can be negative because it is stored as log2 copy-number value.
+The datasets table should contain:
 
-Check missing drug annotations:
-
-```bash
-cat extraction/data/proc/preclinical/drugs/drug_cids_not_found_annotationdb.csv
-```
-
-Check unresolved OncoTree mappings:
-
-```bash
-cat extraction/data/proc/preclinical/cell_line_info/cell_line_info_oncotree_unresolved.csv
+```text
+PRISM
+CTRPv2
+CCLE
+GCSI
+GDSCv1
+GDSCv2
 ```
 
 ---
 
-## 12. Notes on `--replace`
+### 10. Complete end-to-end command sequence
 
-For a full clean reload, do not use `--replace`; drop the tables and run the seeders normally.
+For a normal clean run after the old database tables have been dropped, the complete command sequence is:
 
-Use `--replace` only when reloading one dataset into an existing database.
+```bash
+R_LIBS_USER=NULL R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_prism_preclinical.R
+R_LIBS_USER=NULL R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_ctrpv2_preclinical.R
+R_LIBS_USER=NULL R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_ccle_preclinical.R
+R_LIBS_USER=NULL R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_gcsi_preclinical.R
+R_LIBS_USER=NULL R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_gdscv1_preclinical.R
+R_LIBS_USER=NULL R_MAX_VSIZE=64Gb pixi run Rscript extraction/scripts/preclinical/extract_gdscv2_preclinical.R
 
-Example:
+pixi run python -m seeding.scripts.preclinical_seed_prism
+pixi run python -m seeding.scripts.preclinical_seed_ctrpv2
+pixi run python -m seeding.scripts.preclinical_seed_ccle
+pixi run python -m seeding.scripts.preclinical_seed_gcsi
+pixi run python -m seeding.scripts.preclinical_seed_gdscv1
+pixi run python -m seeding.scripts.preclinical_seed_gdscv2
+
+pixi run python -m seeding.scripts.update_gene_table_names
+
+pixi run python -m seeding.scripts.preclinical_seed_drugs_from_annotationdb --batch-size 250
+pixi run python -m seeding.scripts.preclinical_seed_cell_line_info_from_annotationdb --batch-size 250
+```
+
+The ordering of the final three operations is important:
+
+```text
+dataset seeders
+    ↓
+update_gene_table_names
+    ↓
+drug enrichment
+    ↓
+cell-line enrichment
+```
+
+`update_gene_table_names` should not be run before the molecular dataset seeders because additional datasets can introduce additional Ensembl IDs into `pre_clinical_gene`.
+
+---
+
+### 11. Reloading a single dataset
+
+The dataset seeders support `--replace` when an individual dataset needs to be regenerated without rebuilding the entire preclinical database.
+
+For example:
 
 ```bash
 pixi run python -m seeding.scripts.preclinical_seed_ccle --replace
 ```
 
-This deletes and reinserts only the CCLE dataset rows. It does not reset every preclinical table.
-
----
-
-## 13. Common troubleshooting
-
-### Missing raw PSet file
-
-If an extractor fails because a PSet is missing, confirm the exact file name and location:
-
-```bash
-ls -lh extraction/data/raw/preclinical/
-```
-
-### MySQL foreign key errors
-
-For a full rerun, make sure the tables were dropped in dependency order with:
-
-```sql
-SET FOREIGN_KEY_CHECKS = 0;
-```
-
-and then re-enabled with:
-
-```sql
-SET FOREIGN_KEY_CHECKS = 1;
-```
-
-### AnnotationDB missing CIDs or accessions
-
-Missing API results are written to audit CSVs. They do not necessarily indicate a pipeline failure.
-
-### OncoTree 404 responses
-
-A 404 from OncoTree name search means no tumor type matched that disease description. The seeder should move to the next disease description. If none resolve, `first_level` and `second_level` are stored as `NULL`.
+For a **full clean rebuild**, dropping the preclinical tables and running the normal seeders without `--replace` is preferred.
