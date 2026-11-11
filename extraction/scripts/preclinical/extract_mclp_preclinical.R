@@ -46,6 +46,8 @@ filter_cell_lines <- function(pset) {
   cell_line_table <- qc_cell_lines[tolower(qc_cell_lines$cell_line) %in% tolower(sample_info[[cell_line_column]]), c('cell_line', 'tissueid', 'mod_tissueid', 'Cellosaurus.Accession.id', 'cellosaurus.category', 'cellosaurus.sex', 'cellosaurus.age')]
 
   colnames(cell_line_table) <- c('cell_line_name', 'tissueid', 'mod_tissueid', 'accession', 'category', 'sex', 'age')
+  #trim whitespace and keep integer prefix from age to get proper age value
+  cell_line_table$age <- as.integer(sub("^([0-9]+).*$", "\\1", trimws(cell_line_table$age)))
 
   return(cell_line_table[!duplicated(cell_line_table$cell_line_name), ])
 
